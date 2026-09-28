@@ -1,0 +1,19 @@
+[package]
+name = "callboard"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+callboard-core.workspace = true
+rustix.workspace = true
+thiserror.workspace = true
+
+tempfile.workspace = true
+tokio.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true

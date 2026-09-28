@@ -1,0 +1,87 @@
+name: Controls
+
+# Runs the BASE definition, never candidate code or candidate scripts.
+# Repository protection must require "control files reviewed".
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+permissions:
+  contents: read
+  pull-requests: read
+concurrency:
+  group: controls-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  control-files:
+    name: control files reviewed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Evaluate control changes using base policy only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import PurePosixPath
+          import subprocess
+
+          def protected(path):
+              parts = PurePosixPath(path).parts
+              return (
+                  path.startswith(('.github/', '.cargo/', 'scripts/', 'crates/callboard/src/'))
+                  or 'tests' in parts
+                  or PurePosixPath(path).name in {'Cargo.toml', 'Cargo.lock', 'build.rs', 'rust-toolchain', 'rust-toolchain.toml'}
+                  or path in {'.gitignore', 'crates/callboard-core/src/feed.rs'}
+              )
+
+          def evaluate(event, current, files, permission, attempt):
+              for side in ('head', 'base'):
+                  if current[side]['sha'] != event['pull_request'][side]['sha']:
+                      raise RuntimeError('PR revision changed; this event cannot approve it.')
+              if len(files) != current['changed_files'] or len(files) >= 3000:
+                  raise RuntimeError('Incomplete or oversized file list; refusing to pass.')
+              touched = sorted({p for f in files for p in (f['filename'], f.get('previous_filename', '')) if p and protected(p)})
+              if not touched:
+                  return []
+              label = 'reviewed-controls'
+              if not (event['action'] == 'labeled'
+                      and event.get('label', {}).get('name') == label
+                      and permission in {'admin', 'maintain', 'write'}
+                      and attempt == '1'
+                      and any(v['name'] == label for v in current['labels'])):
+                  raise RuntimeError('Protected definitions changed: ' + json.dumps(touched)
+                                     + '. A maintainer with write access must review this revision and remove/reapply reviewed-controls. Old labels and reruns do not approve changes.')
+              return touched
+
+          def api(path, paginate=False):
+              args = ['gh', 'api', path]
+              if paginate:
+                  args += ['--paginate', '--slurp']
+              return json.loads(subprocess.check_output(args))
+
+          def main():
+              with open(os.environ['GITHUB_EVENT_PATH']) as source:
+                  event = json.load(source)
+              repo = os.environ['GITHUB_REPOSITORY']
+              endpoint = f"repos/{repo}/pulls/{int(event['number'])}"
+              current = api(endpoint)
+              pages = api(endpoint + '/files?per_page=100', paginate=True)
+              files = [entry for page in pages for entry in page]
+              permission = None
+              if event['action'] == 'labeled' and event.get('label', {}).get('name') == 'reviewed-controls':
+                  from urllib.parse import quote
+                  sender = quote(event['sender']['login'], safe='')
+                  permission = api(f'repos/{repo}/collaborators/{sender}/permission')['permission']
+              touched = evaluate(event, current, files, permission, os.environ['GITHUB_RUN_ATTEMPT'])
+              # Fail if a push, base change, or label removal raced the queries.
+              evaluate(event, api(endpoint), files, permission, os.environ['GITHUB_RUN_ATTEMPT'])
+              print('PASS: maintainer reviewed controls for this revision' if touched else 'PASS: no control changes')
+
+          if __name__ == '__main__':
+              main()
+          PY
