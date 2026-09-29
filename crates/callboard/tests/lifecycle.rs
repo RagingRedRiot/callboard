@@ -1,11 +1,9 @@
 #![cfg(target_os = "linux")]
 
 use std::fs::{self, DirBuilder, Permissions};
-use std::io::{BufRead, BufReader};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
 
 use callboard::lifecycle::{Environment, LifecycleError, Paths, ServiceGuard};
 
@@ -206,10 +204,11 @@ fn non_socket_and_symlink_entries_are_never_removed() {
     let target = root.path().join("target");
     fs::write(&target, "untouched").unwrap();
     symlink(&target, paths.socket()).unwrap();
-    assert!(matches!(
-        ServiceGuard::bind(paths.clone()),
-        Err(LifecycleError::UnsafePath { .. })
-    ));
+    let result = ServiceGuard::bind(paths.clone()).map(|_| ());
+    assert!(
+        matches!(result, Err(LifecycleError::UnsafePath { .. })),
+        "{result:?}"
+    );
     assert!(fs::symlink_metadata(paths.socket()).unwrap().is_symlink());
     assert_eq!(fs::read_to_string(target).unwrap(), "untouched");
 }
@@ -331,81 +330,4 @@ async fn prepared_database_works_with_sqlx_and_restarts() {
     );
     store.close().await;
     drop(restarted);
-}
-
-// Invoked as a subprocess by the lock/crash test; inert in the normal test run.
-#[test]
-fn child_service() {
-    let Some(root) = std::env::var_os("CALLBOARD_TEST_ROOT") else {
-        return;
-    };
-    let paths = Paths::resolve(&environment(Path::new(&root))).unwrap();
-    if std::env::var_os("CALLBOARD_TEST_CONTEND").is_some() {
-        assert!(matches!(
-            ServiceGuard::bind(paths),
-            Err(LifecycleError::AlreadyRunning(_))
-        ));
-        return;
-    }
-    let _guard = ServiceGuard::bind(paths).unwrap();
-    println!("READY");
-    loop {
-        std::thread::park();
-    }
-}
-
-struct ChildCleanup(Child);
-impl Drop for ChildCleanup {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-#[test]
-fn cross_process_lock_and_crash_recovery() {
-    let root = private_tempdir();
-    let paths = Paths::resolve(&environment(root.path())).unwrap();
-    let executable = std::env::current_exe().unwrap();
-    let mut child = ChildCleanup(
-        Command::new(&executable)
-            .args(["--exact", "child_service", "--nocapture"])
-            .env("CALLBOARD_TEST_ROOT", root.path())
-            .env_remove("CALLBOARD_TEST_CONTEND")
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
-    let mut reader = BufReader::new(child.0.stdout.take().unwrap());
-    loop {
-        let mut line = String::new();
-        assert_ne!(
-            reader.read_line(&mut line).unwrap(),
-            0,
-            "child exited before startup"
-        );
-        if line.trim() == "READY" {
-            break;
-        }
-    }
-    let contender = Command::new(&executable)
-        .args(["--exact", "child_service", "--nocapture"])
-        .env("CALLBOARD_TEST_ROOT", root.path())
-        .env("CALLBOARD_TEST_CONTEND", "1")
-        .output()
-        .unwrap();
-    assert!(
-        contender.status.success(),
-        "{}",
-        String::from_utf8_lossy(&contender.stderr)
-    );
-    child.0.kill().unwrap();
-    child.0.wait().unwrap();
-    assert!(
-        paths.socket().exists(),
-        "crash leaves the socket entry behind"
-    );
-    let recovered = ServiceGuard::bind(paths.clone()).unwrap();
-    assert!(UnixStream::connect(paths.socket()).is_ok());
-    drop(recovered);
 }

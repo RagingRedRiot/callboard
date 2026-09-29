@@ -148,8 +148,290 @@
   root-owned sticky directories such as `/tmp` are allowed. Symlinked paths are
   rejected, even when user-owned. Existing insecure permissions are not repaired.
 
-## Suggested session 6
+## Session 6
 
-Implement board/todo/note persistence and migrations in `callboard-core`, with
-archive/restore/move semantics and source references. Keep HTTP/CLI wiring for
-a subsequent slice. View state, events, GUI, and MCP remain later work.
+- Added the `0002_boards_items.sql` migration for named boards, todos, and notes.
+- Added typed core models and SQLx operations for board create/list/rename/delete;
+  todo/note create, archive, restore, move, and permanent deletion; plus todo
+  completion state and source references.
+- A source reference is stored as feed/key text without a foreign key, so it
+  survives feed item removal as designed.
+- A confirmed non-empty board deletion moves its items into a private system
+  archive board, preserving item IDs and source references. Normal board lists
+  hide this archive; archive listing and restore operations expose its contents.
+- HTTP/CLI wiring, item editing/reordering, view state, events, GUI, and MCP
+  remain future slices.
+
+## Session 7
+
+- Added local HTTP routes for board listing/creation/renaming/deletion, board
+  contents and archives, todo/note creation, completion, archive/restore/move,
+  permanent deletion, and the archive for items whose board was deleted.
+- Board deletion accepts `{"archive_contents":true}` as the explicit
+  confirmation for preserving non-empty board contents in the private archive.
+- Board and item JSON requests have a 64 KiB body limit. Store errors map to
+  client status codes for missing objects, invalid names, duplicate names, and
+  non-empty board deletion without confirmation.
+- Editing item text and changing manual order remain unimplemented; the current
+  todo PATCH operation changes completion state.
+- `cargo check -p callboard --locked` passed. Tests were not run in this slice.
+
+## Session 8
+
+- Added store coverage for unique board names, lifecycle operations, stable
+  source references after feed deletion, item archive/restore/move, explicit
+  board deletion archival, and persistence after reopening the database.
+- Added service API coverage for board and item creation, duplicate-name and
+  missing-board responses, completion state, board/item archives, confirmed
+  board deletion, restore, and move routes.
+- Item-field editing and manual ordering remain out of scope because the design
+  docs do not settle their patch/request shape yet.
+- Core tests, service library tests, and service integration tests pass;
+  Clippy passes with warnings denied. The service tests needed an unsandboxed
+  run because the sandbox reports `/` as UID 65534 and the service correctly
+  rejects that untrusted ancestor in its path-security checks.
+
+## Session 9
+
+- Added SQLx PATCH operations for editing todo/note fields, moving between
+  boards, completing todos, archiving/restoring, and changing zero-based order.
+- Item PATCHes accept only changed fields; JSON null clears optional text,
+  color, and reference fields. A restore from a deleted board's archive requires
+  a destination `board_id`.
+- Exposed the PATCH contract at `/todos/{id}` and `/notes/{id}`. Existing action
+  routes remain available for compatibility.
+- Updated DESIGN.md §8.1 with the field and ordering semantics.
+- Added tests for editing, clearing nullable values, reordering, moving,
+  archiving/restoring, invalid positions, and the HTTP PATCH routes.
+- Core tests, service integration tests, and Clippy with warnings denied pass.
+
+## Session 10
+
+- Added migration `0003_feed_view_state.sql` for item snooze state, manual feed
+  order, and an explicit manual-order mode that remains enabled when a feed is
+  temporarily empty.
+- Feed reads now return display order, manual-order status, and per-key snooze
+  state. Time snoozes wake when their UTC Unix millisecond instant passes;
+  wake-on-update snoozes clear only when submitted content changes.
+- Manual order inserts newly submitted items at the top, prunes removed keys,
+  survives snapshots and restarts, and resets to tool order on request.
+- Added `PATCH /feeds/{name}/items/{key}` for snooze state, zero-based position,
+  and `reset_order`; documented those request semantics in DESIGN.md §8.1.
+- Added core and API tests for persistence, update wake behavior, insertion,
+  pruning, reset, missing items, and invalid positions. Core and service tests
+  pass; Clippy with warnings denied, formatting, and whitespace checks pass.
+
+## Session 11
+
+- Added atomic store promotion operations and `POST /feeds/{name}/items/{key}/promote`
+  with `board_id` plus `kind: "todo" | "note"`. Promotion reads and copies the
+  current source item while holding the SQLite write transaction, so source
+  submissions cannot race copied fields.
+- Promoted todos and notes copy title, optional body, and URL, with a durable
+  `{feed,key}` reference that has no source foreign key. Missing items return
+  404; deleting the source leaves promoted objects intact.
+- Added `0004_note_url.sql` because the design requires copied URLs on both
+  promoted resource types, while notes previously had no URL field. Note create
+  and PATCH APIs now accept that optional field.
+- Updated DESIGN.md §§5.2, 5.3, and 8.1 and added core/API tests for promotion,
+  copied values, missing sources, and source deletion.
+- Core tests, service integration tests, Clippy with warnings denied, format,
+  and whitespace checks pass.
+
+## Suggested session 12 (completed below)
+
+Display-time reference resolution for board reads.
+
+## Audit of sessions 6–11
+
+Reviewed the accumulated storage, migrations, board/item API, snooze/order, and
+promotion work against DESIGN.md. Found and corrected:
+
+- Combined snoozes did not expire at their deadline when wake-on-update was set.
+  Normalize expired state before applying later patches to prevent revival.
+- Item routes used raw URI segments, making URL-shaped keys inaccessible.
+  Decode percent-encoded UTF-8 segments once, preserving literal plus signs.
+- Negative board positions reached SQL constraints (HTTP 500); archived-item
+  reorders were silently ignored. Reject both atomically as client errors.
+- Snooze-only updates returned submitted positions during manual ordering.
+- Board item creation/edits lacked the documented title/body content limits.
+- Moving via PATCH could silently restore archived items. Move now preserves
+  archive state, and archive plus destination is accepted consistently.
+- Action and PATCH implementations diverged; move/restore responses were read
+  after commit. Shared transactional mutations now return their own result.
+- Board/archive HTTP reads assembled multiple database snapshots; these now
+  read metadata and both item lists in one transaction. Rename responses no
+  longer re-read a potentially deleted or renamed board after committing.
+- PATCH typos and nulls for required values were silently ignored. Reject them;
+  nullable fields retain explicit clearing. Reject reset-order plus position.
+- Corrected board-route 404/405 handling and empty-object deletion requests.
+
+Added six core audit tests and an HTTP regression covering encoded keys,
+validation, and routing. Four initial core regressions were observed failing
+before fixes. Upgrade tests preserve existing data from migration versions 1
+and 3, including notes created before the URL column existed.
+
+Validation: `python3 scripts/checks.py --local` passed: 56 Rust tests, 15 Python
+gate tests, formatting, Clippy with warnings denied, build, and mandatory Docker
+cross-UID checks in both directions. Foreign reads/writes were rejected even
+with filesystem socket permissions relaxed; owners retained access. No UID
+authentication, dependency, or workflow-control changes were made. This is
+local development validation, not trusted-base merge approval.
+
+Remaining verification caveat: the existing
+`stale_owned_socket_is_replaced_but_live_socket_is_preserved` test failed once
+with SocketInUse after dropping its fixture listener. It passed on the earlier
+workspace run, an isolated rerun, and the full workflow rerun. Cause remains
+unconfirmed; neither the test nor production lifecycle code was weakened.
+
+No new feature session was started. Display-time source-reference resolution
+remains the next planned feature. Audit changes remain uncommitted.
+
+
+## Session 12
+
+- Board and archive GET responses now include `resolved_reference`: null for
+  unlinked objects, live with the full current source item, or source_gone.
+- Resolution happens in the same read transaction as board metadata and items,
+  using one batch lookup of distinct references rather than a query per object.
+- Stored references and user-edited/copied fields remain unchanged. Removed
+  sources resolve gone; reappearing feed/key pairs resolve live again.
+- Added HTTP coverage for live updates, copied-content preservation, unlinked
+  notes, key removal/reappearance, board archives, deleted-board archives, and
+  feed deletion. Updated the API contract in DESIGN.md §5.3.
+
+- Validation: full `python3 scripts/checks.py --local` passed: 57 Rust tests,
+  15 workflow tests, formatting, Clippy, build, and both Docker UID-isolation
+  cases. The previously intermittent stale-socket test passed this session.
+
+## Session 13
+
+- Added migration 0005 for named layouts, with atomic replacement and ordered
+  reads through SQLx. Layout targets have no foreign keys, retaining placeholders
+  for absent/deleted feeds and boards.
+- Added toolkit-independent typed panel trees: empty root, feed/board leaves,
+  weighted splits, and tabs with an active index. Validation bounds names, body
+  size, depth, node count, and shape; invalid saves leave prior state intact.
+- Added GET /layouts and PUT /layouts/{name}, including decoded Unicode/path
+  names and the existing bounded request-body reader. Documented the contract
+  in DESIGN.md §6.4. No dependencies were added.
+- Tests cover shape/size limits, target deletion, restart persistence, atomic
+  replacement, encoded names, and API error handling.
+
+- Validation: full `python3 scripts/checks.py --local` passed: 60 Rust tests,
+  15 workflow tests, formatting, Clippy, build, and Docker UID isolation in both
+  directions. This is development validation, not merge approval.
+
+## Session 14
+
+- Added a shared, bounded Store notification bus. Successful mutations emit
+  feed, board, or layout invalidations after committing. Failed mutations and
+  reads emit nothing; moves notify both boards and deleted-board contents
+  invalidate the system archive.
+- Added authenticated GET /events SSE with initial/lag resync, heartbeat
+  comments, 128 buffered notices, and a 16-subscriber cap. Streams rotate after
+  25 seconds to retain the existing 30-second connection bound; reconnect and
+  refetch behavior is documented in DESIGN.md §8.2.
+- Stream bodies own their receivers and subscription permits without detached
+  forwarding tasks. Slow consumers do not block writes; disconnects release
+  resources. Enabled the existing Tokio sync feature; no new crate/version.
+- Added tests across store mutation families, rejection/rollback silence,
+  notification visibility, lag, stream expiry/permit cleanup, and HTTP delivery
+  and reconnect resync.
+- Full `python3 scripts/checks.py --local` passed: 63 Rust tests, 15 workflow
+  tests, formatting, Clippy, build, and both Docker UID-isolation cases. Local
+  development validation only; changes remain uncommitted.
+
+## Session 15
+
+- Added board list/create/read/rename/delete/archive CLI commands, plus todo
+  and note creation, bounded JSON PATCH input, archive/restore/move/delete,
+  and todo completion/undo. Board selectors accept an ID or exact name.
+- Commands use the existing service API, JSON stdout, stderr errors, and global
+  --no-auto-start behavior. Invalid typed patches, IDs, and content limits are
+  checked before connecting; nullable fields preserve PATCH clearing semantics.
+- Added CLI integration tests for automatic startup, names and IDs, edits,
+  moves, archives, explicit nonempty-board deletion, error output, and rejecting
+  invalid input without starting the service. Updated README and DESIGN.md.
+- Final full `python3 scripts/checks.py --local` passed: 65 Rust tests, 15
+  workflow tests, formatting, Clippy, build, and both Docker UID-isolation cases.
+- Verification caveat: the existing non_socket_and_symlink_entries_are_never_removed
+  lifecycle test failed twice at its second bind assertion before CLI tests ran.
+  It passed in isolation, in a diagnostic lifecycle run, and in the final full
+  workflow. Added the actual result to its failure message; cause remains
+  unresolved. No lifecycle production behavior or assertion was weakened.
+- Changes remain uncommitted; local development checks do not approve a merge.
+
+## Session 16
+
+- Added feed patch NAME KEY for bounded, typed JSON snooze/order updates and
+  feed promote NAME KEY BOARD [--kind todo|note], accepting board IDs or names.
+- Added layouts and layout save NAME with local panel-tree validation and
+  bounded stdin. Invalid inputs are rejected before service access; patch
+  bodies preserve explicit nulls and omitted fields.
+- Added byte-wise URI segment encoding for literal keys/names, including URL
+  keys, Unicode, plus signs, percent signs, slashes, and query/fragment markers.
+- Integration tests cover snooze/reset/reorder, both promotion kinds, source
+  references, layout replacement, auto-start/no-auto-start, failed saves,
+  missing sources, malformed/oversized input, and validation before startup.
+- The existing stale-socket test failed again in the first workflow run. Moved
+  the subprocess lock/crash tests unchanged to lifecycle_process.rs so fork/exec
+  cannot temporarily retain parallel lifecycle tests' socket/lock descriptors.
+  This removes a plausible source of the recurring lifetime-test interference;
+  the final full workflow passed. No production lifecycle checks were changed.
+- Full local workflow passed: 67 Rust tests, 15 workflow tests, formatting,
+  Clippy, build, and Docker UID isolation in both directions. Updated README
+  and DESIGN.md. Changes remain uncommitted; no merge approval claimed.
+
+## Session 17
+
+- Replaced the GUI placeholder with an eframe/egui 0.36.2 desktop preview using
+  the glow renderer and Wayland/X11 support. Graphics dependencies remain in
+  callboard-gui; the service/CLI dependency graph does not include eframe.
+- Added a read-only backend using the existing authenticated Unix-socket client,
+  requiring an already-running service. It never opens SQLite or auto-starts a
+  service. A bounded worker handles requests off the UI thread; old-selection
+  responses are discarded. Refresh is manual and every five seconds for now.
+- Added feed/board sidebar selection, deleted-board archive, content display,
+  feed age/error/stale status, snoozed visibility, disabled todo checkboxes,
+  source reference status, deleted-resource placeholders, and connection errors.
+  Only explicit HTTP(S) links are clickable; bodies are rendered as plain text.
+- Added deserialization for shared board display models and tests against a
+  real authenticated service, including source updates/deletion, missing
+  resources, disconnects, headless UI rendering, and late-response rejection.
+- Updated README with launch instructions and preview limitations. No editing,
+  saved/draggable panels, or SSE client was added in this session.
+
+- Validation: full local workflow passed with 69 Rust tests, 15 workflow tests,
+  formatting, Clippy, build, and both Docker UID-isolation cases. The GUI binary
+  built and ran for a 12-second desktop launch smoke check without diagnostics,
+  then timeout closed it. Visual interaction was not manually inspected (the
+  Wayland window did not appear in the X11 window list). Headless rendering is
+  covered by the test suite; saved layouts and editing remain unimplemented.
+- Changes remain uncommitted; no merge approval claimed.
+
+## Session 18
+
+- The GUI backend now passes the sibling/PATH `callboard` executable through
+  the existing authenticated client. Lookup order is `CALLBOARD_EXECUTABLE`,
+  sibling executable, then PATH. Invalid/missing candidates fall back to the
+  existing service-only behavior with a visible setup hint.
+- Added `--no-auto-start` for GUI users who require an already-running service.
+  Auto-start uses the CLI client lifecycle, XDG paths and socket directory, so
+  the service lock prevents duplicates and the daemon remains independent of
+  the GUI window and continues serving CLI/feed jobs after it closes.
+- Added executable lookup tests and an integration test that starts an isolated
+  daemon through the GUI backend, proves later refreshes retain the same daemon
+  PID, verifies the daemon serves after the first client request returns, and
+  stops it cleanly. Updated README and DESIGN.md.
+- Full local workflow passed: 71 Rust tests, 15 workflow tests, formatting,
+  Clippy, build, and both Docker UID isolation cases. No CI, workflow,
+  dependency, database, or service authentication changes were made beyond the
+  existing eframe dependencies and GUI lifecycle path. Changes remain
+  uncommitted; this is development validation, not merge approval.
+
+## Suggested session 19
+
+Connect the GUI to `/events` for prompt refresh, including reconnect, initial
+resync, lag handling, and a polling fallback. Then load persisted named layouts
+in the sidebar/window; keep layout editing for a later session.

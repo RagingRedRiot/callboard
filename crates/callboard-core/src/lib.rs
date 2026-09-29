@@ -2,3 +2,5 @@
 
 pub mod feed;
 pub mod store;
+
+pub mod layout;

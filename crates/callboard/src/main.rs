@@ -1,3 +1,6 @@
+mod board_cli;
+mod view_cli;
+
 use callboard::{
     Error, client,
     lifecycle::{Environment, Paths},
@@ -48,6 +51,28 @@ enum Command {
         #[arg(long, value_parser = clap::value_parser!(u8).range(1..))]
         exit_changed: Option<u8>,
     },
+    /// List boards as JSON.
+    Boards,
+    Board {
+        #[command(subcommand)]
+        command: board_cli::BoardCommand,
+    },
+    Todo {
+        #[command(subcommand)]
+        command: board_cli::TodoCommand,
+    },
+    Note {
+        #[command(subcommand)]
+        command: board_cli::NoteCommand,
+    },
+    /// Read the archive of items from deleted boards.
+    Archive,
+    /// List saved layouts as JSON, including their panel trees.
+    Layouts,
+    Layout {
+        #[command(subcommand)]
+        command: view_cli::LayoutCommand,
+    },
     /// List feeds as JSON.
     Feeds,
     /// Read one feed as JSON.
@@ -56,14 +81,9 @@ enum Command {
     Fail { name: String, message: String },
     Feed {
         #[command(subcommand)]
-        command: FeedCommand,
+        command: view_cli::FeedCommand,
     },
 }
-#[derive(Subcommand)]
-enum FeedCommand {
-    Rm { name: String },
-}
-
 #[tokio::main]
 async fn main() -> ExitCode {
     match run(Cli::parse()).await {
@@ -143,6 +163,20 @@ async fn run(cli: Cli) -> Result<u8, Error> {
                 Some((exit_added, exit_changed)),
             )
         }
+        Command::Boards => ("GET", "/boards".into(), vec![], None),
+        Command::Archive => ("GET", "/archive".into(), vec![], None),
+        Command::Board { command } => {
+            let req = board_cli::board(command, &paths, auto).await?;
+            (req.method, req.resource, req.body, None)
+        }
+        Command::Todo { command } => {
+            let req = board_cli::todo(command, &paths, auto).await?;
+            (req.method, req.resource, req.body, None)
+        }
+        Command::Note { command } => {
+            let req = board_cli::note(command, &paths, auto).await?;
+            (req.method, req.resource, req.body, None)
+        }
         Command::Feeds => ("GET", "/feeds".into(), vec![], None),
         Command::Get { name } => {
             validate_feed_name(&name)?;
@@ -156,11 +190,14 @@ async fn run(cli: Cli) -> Result<u8, Error> {
             }
             ("POST", format!("/feeds/{name}/error"), body, None)
         }
-        Command::Feed {
-            command: FeedCommand::Rm { name },
-        } => {
-            validate_feed_name(&name)?;
-            ("DELETE", format!("/feeds/{name}"), vec![], None)
+        Command::Feed { command } => {
+            let req = view_cli::feed(command, &paths, auto).await?;
+            (req.method, req.resource, req.body, None)
+        }
+        Command::Layouts => ("GET", "/layouts".into(), vec![], None),
+        Command::Layout { command } => {
+            let req = view_cli::layout(command).await?;
+            (req.method, req.resource, req.body, None)
         }
     };
     let (status, body) = client::request(&paths, method, &resource, body, auto).await?;

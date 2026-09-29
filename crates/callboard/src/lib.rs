@@ -7,3 +7,5 @@ pub mod client;
 pub mod server;
 pub mod setup;
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
+
+mod events;

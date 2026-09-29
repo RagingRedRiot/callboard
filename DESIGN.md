@@ -159,6 +159,11 @@ tool's order.
 There is no dismiss state. Snooze covers "not now"; the source covers "done" by
 dropping the item from the next snapshot.
 
+The service stores an optional snooze-until instant as UTC Unix milliseconds and
+a `wake_on_update` flag. Either condition can end a snooze, and both may be set.
+Manual positions are zero-based. Newly submitted items are inserted before the
+existing manual order; reset removes manual order and returns to submitted order.
+
 ## 5. Boards, todos, and notes
 
 ### 5.1 Boards
@@ -170,9 +175,9 @@ to be empty or an explicit confirmation that archives its contents.
 ### 5.2 Todos and notes
 
 A todo has a title, optional body and URL, a done flag, an optional reference
-(§5.3), and a position in its board. A note has a body, an optional title,
-color, and reference, and a position in its board; the GUI renders notes as
-sticky-note cards beside the board's todo list.
+(§5.3), and a position in its board. A note has a body, an optional title and
+URL, color, and reference, and a position in its board; the GUI renders notes
+as sticky-note cards beside the board's todo list.
 
 Todos and notes never expire. Marking a todo done keeps it visible until it is
 archived. Archiving hides an item into the board's archive, from which it can be
@@ -185,7 +190,9 @@ replaces them.
 ### 5.3 Promotion and references
 
 Promoting a feed item creates a todo or note in a chosen board. The new object
-copies the item's title and URL, and stores a reference `{feed, key}`.
+copies the item's title and URL, copies its body when present, and stores a
+reference `{feed, key}`. For a note, the copied URL is kept in the note's URL
+field and the copied body becomes its note body.
 
 References resolve at display time:
 
@@ -193,6 +200,18 @@ References resolve at display time:
   title and can reveal it in its feed panel.
 - **source gone** — the item or its feed no longer exists. The GUI shows the
   copied title and URL with a "source gone" marker.
+
+Board reads (`GET /boards/{id}`, `GET /boards/{id}/archive`, and `GET /archive`)
+include a display-only `resolved_reference` on each todo and note:
+
+- `null` when the object has no reference;
+- `{"status":"live","item":{...}}` with the current full feed item;
+- `{"status":"source_gone"}` when the referenced feed/key is absent.
+
+The stored `reference` and copied fields remain unchanged. If the same feed/key
+reappears, it resolves live again. Resolution uses the board read's database
+snapshot, including archived objects. Mutation responses contain stored fields;
+clients refetch the board to obtain current display-time resolution.
 
 A reference never keeps a feed item alive, and removing an item never alters the
 todo or note that references it. "Source gone" is itself useful: the tracked
@@ -232,6 +251,30 @@ layouts never changes feeds or boards.
 
 A layout leaf whose feed or board has been deleted shows an empty placeholder
 until the user retargets or closes it.
+
+The layout API is independent of the GUI toolkit. `GET /layouts` returns all
+saved layouts sorted by name, each with `name`, `tree`, and `updated_at_ms`.
+`PUT /layouts/{name}` accepts `{"tree": ...}` and atomically creates or replaces
+that name, returning the saved layout with HTTP 200. Names are case-sensitive,
+1–100 Unicode characters, without surrounding whitespace or control characters;
+encode the name as one URI path segment. An empty list is valid before any save.
+
+Tree nodes are tagged with `kind`:
+
+- `{"kind":"empty"}` represents an empty layout (root only).
+- `{"kind":"feed","name":"reviews"}` targets a feed.
+- `{"kind":"board","id":2}` targets a user board (ID greater than 1).
+- `{"kind":"split","axis":"horizontal","children":[...],"weights":[2,1]}`
+  splits two or more children. Axis is horizontal or vertical; each child has
+  a finite positive relative weight, and their sum must be finite.
+- `{"kind":"tabs","children":[...],"active":0}` holds one or more children
+  with a zero-based active index.
+
+Unknown fields, invalid targets, and invalid tree shapes are rejected. Targets
+are validated syntactically, not checked for existence. Trees are limited to
+256 nodes and 16 levels (root counts as one); save bodies are limited to 64 KiB.
+Invalid saves preserve the previous layout. Saving layouts does not mutate
+feeds or boards, and target deletion does not modify stored layouts.
 
 ### 6.5 Live updates
 
@@ -277,8 +320,7 @@ isolated deployment. Socket-directory overrides must be absolute.
 service alone. When no service is running, `systemctl --user start
 callboard.service` starts the installed unit immediately. The unit records the
 current executable and resolved paths; rerun setup after moving the binary.
-Without a running service, the CLI starts it on demand (the GUI will use the
-same client support). `--no-auto-start` requires an existing service. A
+Without a running service, the CLI and GUI start it on demand through the same client support; the GUI defaults to auto-start too and offers `--no-auto-start` for a required existing service. `--no-auto-start` requires an existing service. A
 data-directory lock prevents competing services;
 startup checks ownership before replacing a stale socket. Closing the GUI does
 not stop the service.
@@ -318,6 +360,30 @@ directories are private to the user.
 | `GET /layouts`, `PUT /layouts/{name}` | Read or save layouts |
 | `GET /events` | Change stream (§8.2) |
 
+Todo and note PATCH bodies contain only changed fields. JSON `null` clears an
+optional field such as a body, URL, title, color, or reference. Their editable
+fields also include `done` for todos and a zero-based `position` within the
+board's active list of the same item type. `board_id` moves an item; `archived`
+archives it when true and restores it when false. Restoring an item from the
+archive for a deleted board requires `board_id` to select its destination.
+Moving alone preserves archive state; restoring requires `archived: false`.
+Archived items cannot be reordered until restored. Unknown PATCH fields and
+null values for non-nullable fields are rejected. Board item titles and bodies
+use the same content limits as feed items (§8.3).
+
+Feed item PATCH bodies can set `snoozed_until_ms` (UTC Unix milliseconds),
+`wake_on_update`, or zero-based `position`. A null `snoozed_until_ms` clears the
+time condition; setting both snooze fields uses whichever wake condition comes
+first. `reset_order: true` returns the feed to submitted order and cannot be
+combined with `position`. Item keys in request paths must be percent-encoded
+as a single URI segment (including slashes in URL-shaped keys); the service
+decodes that segment exactly once.
+
+Promotion requests provide `board_id` and `kind` (`todo` or `note`). Promotion
+copies the current source title and URL, also copying its body when present;
+both resource types retain the source reference. Notes keep the URL in their
+optional URL field.
+
 A snapshot body:
 
 ```json
@@ -350,6 +416,41 @@ A change summary:
 board, or layout that changed. Notices carry identifiers, not content; clients
 refetch.
 
+The response uses `text/event-stream`. After each successful committed write,
+`event: change` carries a JSON identifier in `data`:
+
+- `{"resource":"feed","name":"reviews"}` for submissions, error status,
+  snooze/order changes, or deletion;
+- `{"resource":"board","id":2}` for board and contained-item changes;
+- `{"resource":"layout","name":"Day"}` for layout saves.
+
+Moves invalidate both origin and destination boards. Board ID 1 identifies the
+system archive (`GET /archive`). Feed notices also invalidate display-time
+references to that feed; clients refetch any affected board/archive view.
+Time-based snooze expiry is computed at read time, so clients schedule their
+own refresh at the returned deadline; the passage of time emits no notice.
+
+Every subscription begins with `event: resync` and `data: {}`. Subscribe first,
+then refetch current state while continuing to consume notices. `resync` also
+means a subscriber fell behind: discard cached assumptions and refetch all
+visible state and resource lists. Events are ephemeral invalidations, not an
+ordered audit log; duplicates are harmless. There are no replay IDs, and
+`Last-Event-ID` does not restore missed history. Reconnect after disconnects or
+service restarts and process the new initial resync.
+
+The shared broadcast buffer holds 128 notices, with at most 16 event streams
+per service; additional subscriptions receive HTTP 503 and should retry later.
+Slow subscribers never block writes. Idle streams send heartbeat comments at
+10-second intervals and end after 25 seconds, within the existing 30-second
+connection deadline; the initial SSE retry interval is 1 second. Clients must
+reconnect. Shutdown retains its bounded grace period. The event route uses the
+same kernel UID authentication as all other requests.
+
+The service's Store clones share the in-process notification bus. Independently
+opened stores or external database writers do not publish to that bus; clients
+must mutate state through the service.
+
+
 ### 8.3 Limits
 
 A snapshot is at most 1,000 items and 4 MiB. Titles are at most 500 characters,
@@ -378,6 +479,32 @@ item.
 
 When both exit-code options match, `--exit-added` takes precedence. CLI metadata
 options override corresponding fields in a full snapshot object.
+
+Board CLI commands are `boards`, `board add NAME`, `board get BOARD`,
+`board rename BOARD NAME`, `board rm BOARD [--archive-contents]`, and
+`board archive BOARD`. `archive` reads the system archive for deleted boards.
+A BOARD selector is a user board ID or exact name; numeric strings are IDs.
+Use `boards` to discover IDs, including for boards with numeric names.
+
+`todo add BOARD TITLE` accepts `--body` and `--url`. `note add BOARD BODY`
+accepts `--title`, `--url`, and `--color`. Both item commands support `patch ID`
+(JSON PATCH object from stdin), `archive ID`, `restore ID BOARD`, `move ID BOARD`,
+and `rm ID`. `todo done ID [--undone]` changes completion. Item IDs are positive
+integers. Commands print successful API responses as JSON; failures print to
+stderr with a nonzero exit. Patch input is limited to 64 KiB and validated
+before contacting the service; omitted fields and explicit nulls retain their
+API semantics. `--no-auto-start` applies to all these commands.
+
+`feed patch NAME KEY` reads a feed-item PATCH object from stdin (at most
+16 KiB), covering snooze and manual order fields (§8.1). `feed promote NAME KEY
+BOARD [--kind todo|note]` copies an item into the selected board; the default
+kind is todo. Feed keys are literal strings, encoded exactly once by the CLI.
+
+`layouts` lists saved layouts with their trees. `layout save NAME` reads and
+validates a `{"tree":...}` object from stdin, bounded at 64 KiB, and creates or
+replaces that layout. Layout names are literal Unicode strings and use the
+same name rules as the API. Validations happen before service access; these
+commands retain global `--no-auto-start` and JSON response semantics.
 
 ### 9.2 cued workflow
 
