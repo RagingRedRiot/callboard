@@ -72,6 +72,39 @@ async fn connection(paths: &Paths, auto_start: Option<&Path>) -> Result<UnixStre
     }
 }
 
+// Abort the connection driver on all exits, including timeout/cancellation.
+struct Driver(tokio::task::JoinHandle<()>);
+impl Drop for Driver {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Handshake and send one request on an authenticated connection. The caller
+/// bounds the time; dropping the returned driver closes the connection.
+async fn send(
+    stream: UnixStream,
+    method: &str,
+    resource: &str,
+    body: Vec<u8>,
+    accept: &str,
+) -> Result<(hyper::Response<hyper::body::Incoming>, Driver), Error> {
+    let (mut sender, connection) =
+        hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+    let driver = Driver(tokio::spawn(async move {
+        let _ = connection.await;
+    }));
+    let request = Request::builder()
+        .method(method)
+        .uri(resource)
+        .header("host", "localhost")
+        .header("content-type", "application/json")
+        .header("accept", accept)
+        .header("connection", "close")
+        .body(Full::new(Bytes::from(body)))?;
+    Ok((sender.send_request(request).await?, driver))
+}
+
 pub async fn request(
     paths: &Paths,
     method: &str,
@@ -81,27 +114,7 @@ pub async fn request(
 ) -> Result<(StatusCode, Vec<u8>), Error> {
     let stream = connection(paths, auto_start).await?;
     tokio::time::timeout(Duration::from_secs(15), async {
-        let (mut sender, connection) =
-            hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
-        let task = tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        // Abort the connection driver on all exits, including timeout/cancellation.
-        struct Driver(tokio::task::JoinHandle<()>);
-        impl Drop for Driver {
-            fn drop(&mut self) {
-                self.0.abort();
-            }
-        }
-        let _driver = Driver(task);
-        let request = Request::builder()
-            .method(method)
-            .uri(resource)
-            .header("host", "localhost")
-            .header("content-type", "application/json")
-            .header("connection", "close")
-            .body(Full::new(Bytes::from(body)))?;
-        let response = sender.send_request(request).await?;
+        let (response, _driver) = send(stream, method, resource, body, "application/json").await?;
         let status = response.status();
         let body = Limited::new(response.into_body(), 16 * 1024 * 1024)
             .collect()
@@ -110,4 +123,47 @@ pub async fn request(
         Ok::<_, Error>((status, body.to_vec()))
     })
     .await?
+}
+
+/// A streaming GET response body, such as `/events`. Dropping it closes the
+/// connection. Callers bound idle time per chunk; the service bounds lifetime.
+pub struct Stream {
+    body: hyper::body::Incoming,
+    _driver: Driver,
+}
+
+impl Stream {
+    /// The next data chunk, or `None` at the end of the body.
+    pub async fn chunk(&mut self) -> Result<Option<Vec<u8>>, Error> {
+        while let Some(frame) = self.body.frame().await {
+            if let Ok(data) = frame?.into_data()
+                && !data.is_empty()
+            {
+                return Ok(Some(data.to_vec()));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Open a streaming GET with the same authentication and auto-start rules as
+/// [`request`]. Only connecting and response headers are time-bounded here.
+pub async fn stream(
+    paths: &Paths,
+    resource: &str,
+    auto_start: Option<&Path>,
+) -> Result<(StatusCode, Stream), Error> {
+    let stream = connection(paths, auto_start).await?;
+    let (response, driver) = tokio::time::timeout(
+        Duration::from_secs(15),
+        send(stream, "GET", resource, vec![], "text/event-stream"),
+    )
+    .await??;
+    Ok((
+        response.status(),
+        Stream {
+            body: response.into_body(),
+            _driver: driver,
+        },
+    ))
 }

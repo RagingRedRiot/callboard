@@ -5,7 +5,7 @@ A Linux per-user bulletin board for tool-submitted feeds, todos, and notes.
 
 The Linux service and CLI support feeds, boards, todos, and notes, backed by
 SQLite through SQLx. The API also provides layouts, promotion, feed view state,
-and change events. A read-only desktop GUI is available; MCP is not implemented
+and change events. A desktop GUI (read-only apart from saving layouts) is available; MCP is not implemented
 yet.
 
 ```sh
@@ -145,10 +145,33 @@ target/debug/callboard-gui
 
 `callboard-gui --no-auto-start` requires an existing service. Both processes
 must use the same XDG and CALLBOARD_SOCKET_DIR settings. Auto-start uses the
-same kernel UID checks, data lock, and process lifecycle as CLI requests. The
-GUI refreshes every five seconds and has a Refresh button. HTTP(S) links open only when clicked; other URL schemes display as text.
-This preview is read-only: editing, draggable/saved layouts, and event-stream
-refresh are subsequent work. Graphics dependencies are confined to the GUI
+same kernel UID checks, data lock, and process lifecycle as CLI requests.
+
+The window arranges feeds and boards as panels in splits and tab groups
+(`egui_tiles`). Click a sidebar entry to show it (revealing it if already
+placed); right-click for new tab, split right/below, or show in the focused
+panel. Drag tabs to rearrange, use **Show…** in a tab bar to retarget the
+active panel, and close panels from their tab. The sidebar lists saved layouts, feeds
+with error/stale markers, and boards; item counts appear for placed resources.
+The GUI opens the first saved layout by name. Panels whose feed or board was
+deleted stay in place as placeholders.
+
+The GUI subscribes to `GET /events` and refetches only what changed, handling
+the initial resync, lag resyncs, and reconnects with backoff. Routine stream
+rotation does not refetch everything; see DESIGN.md §6.5. While the stream is
+down for more than two seconds it polls every five seconds instead; the status
+bar shows Live, Connecting, or Polling. A failed refetch keeps a panel's last
+loaded contents and retries that panel alone after five seconds. HTTP(S) links
+open only when clicked; other URL schemes display as text.
+
+Arrangement changes save to the active layout automatically after a
+one-second pause (`PUT /layouts/{name}`); the layout bar shows saving, saved,
+or a failed save that is retried. **Save as…** stores the current arrangement
+under a new name and **New layout…** creates an empty one; without any saved
+layout the window starts in an unnamed "Unsaved" arrangement. The
+deleted-board archive can be shown but is not stored in layouts. Saving
+layouts is the GUI's only write: feeds, boards, todos, and notes are
+read-only, and editing is subsequent work. Graphics dependencies are confined to the GUI
 crate; building `callboard` alone does not build eframe. A Wayland or X11 desktop
 with OpenGL support is required to launch the window.
 See [PROGRESS.md](PROGRESS.md) for session scope and the next step.

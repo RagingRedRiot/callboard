@@ -265,8 +265,9 @@ Tree nodes are tagged with `kind`:
 - `{"kind":"feed","name":"reviews"}` targets a feed.
 - `{"kind":"board","id":2}` targets a user board (ID greater than 1).
 - `{"kind":"split","axis":"horizontal","children":[...],"weights":[2,1]}`
-  splits two or more children. Axis is horizontal or vertical; each child has
-  a finite positive relative weight, and their sum must be finite.
+  splits two or more children. Axis is horizontal (children left to right) or
+  vertical (top to bottom); each child has a finite positive relative weight,
+  and their sum must be finite.
 - `{"kind":"tabs","children":[...],"active":0}` holds one or more children
   with a zero-based active index.
 
@@ -281,6 +282,13 @@ feeds or boards, and target deletion does not modify stored layouts.
 The GUI subscribes to the service's event stream (§8.2) and refetches whatever
 changed. Submissions appear without refresh; GUI edits made in one window apply
 to others.
+
+The GUI refetches on every resync except one: when a stream that lasted at
+least 20 seconds ends cleanly (the 25-second rotation) and the next connects
+within 2 seconds, it skips that stream's opening resync. Shorter streams that
+end cleanly (a service shutting down) always refetch. It refetches everything open at least every 5
+minutes, which bounds how long a write landing in that millisecond reconnect
+gap can go unseen. A resync mid-stream (lag) always refetches.
 
 ### 6.6 Toolkit
 

@@ -430,8 +430,126 @@ remains the next planned feature. Audit changes remain uncommitted.
   existing eframe dependencies and GUI lifecycle path. Changes remain
   uncommitted; this is development validation, not merge approval.
 
-## Suggested session 19
+## Session 19
 
-Connect the GUI to `/events` for prompt refresh, including reconnect, initial
-resync, lag handling, and a polling fallback. Then load persisted named layouts
-in the sidebar/window; keep layout editing for a later session.
+- Replaced the single selected-resource view with an `egui_tiles` 0.17.1 panel
+  tree (built for egui 0.36; only that crate was added to Cargo.lock). Panels
+  sit in splits and tab groups, can be dragged, retargeted (**Show…**), and
+  closed. Sidebar clicks reveal a placed target or open a tab; the context menu
+  opens a new tab, splits right/below, or retargets the focused panel.
+- Saved layouts load from `GET /layouts` and convert both ways between the
+  service `Panel` tree and the tile tree (weights, active tab, nested splits).
+  The first layout by name opens at startup unless panels were already
+  arranged. Each layout keeps a session-local working copy, so switching back
+  preserves rearrangement. Unmodified copies follow newer saves; rearranged
+  copies are flagged "rearranged" (with Revert) and "newer saved version".
+  Deleted feed/board targets remain as placeholder panels. The deleted-board
+  archive can be shown but is omitted from layout trees. DESIGN.md §6.4 now
+  states that a horizontal split places children left to right.
+- Read-only preserved: no layout or other mutation is sent. Rearrangement is
+  never saved.
+- Added `client::stream`, a streaming GET that reuses the existing
+  authenticated connection path; the buffered `request` is unchanged. The GUI
+  subscribes to `/events` on its own thread with an incremental SSE parser,
+  a 30-second idle bound, and backoff (immediate after healthy rotation,
+  otherwise 1 s doubling to 30 s, honoring `retry:`). The subscriber never
+  auto-starts; fetches keep that role.
+- A scheduler refetches lists plus only affected open targets per notice (feed
+  notices also refresh open boards/archive for references), everything on
+  initial or lag resync, one batch in flight, failed batches after 5 s, snooze
+  deadlines at expiry, and polls every 5 s only after the stream has been down
+  for 2 s. Contents are cached only for placed targets.
+- Sidebar shows feed error/stale markers with hover details and visible/snoozed
+  counts for placed feeds and boards. List endpoints carry no counts, so
+  unplaced entries show none.
+- Fixed `--no-auto-start`: it previously skipped only the
+  `CALLBOARD_EXECUTABLE` override and still auto-started a sibling/PATH binary.
+- Tests: layout round trip, placements, reveal, close/focus, layout switching
+  and save-following; SSE parsing, backoff, scheduler resync/fallback/retry/
+  snooze; headless app flows (saved layout, placeholders, resync, sidebar
+  actions); a real-service subscription through restart; and the autostart
+  test, now also proving the subscriber does not start the daemon.
+- Full local workflow passed: 84 Rust tests, 15 workflow tests, formatting,
+  locked Clippy, build, and both Docker UID isolation cases. An X11 launch
+  against an isolated seeded service showed the saved layout, placeholders,
+  live updates without refresh, and Live → Polling → Live across a daemon kill
+  with GUI auto-restart. Changes remain uncommitted; not merge approval.
+
+### Session 19 review fixes
+
+A high-effort code review found nine issues; all are fixed with regression
+tests:
+
+- Saved layouts that the tile tree simplifies (one-child tabs, nested same-axis
+  splits) no longer show "rearranged" on load; the base is the normalized form.
+- Switching tabs no longer counts as rearranging. A service change to the
+  active tab alone is still detected.
+- A dropped active archive tab saves as its left neighbour.
+- A failed refetch keeps the panel's last contents and shows the error above
+  them.
+- Only failed batch parts retry, after 5 s. Lists and each target retry
+  separately, and nothing else is held back.
+- A 404 from `/layouts` (a service predating layouts) yields no layouts instead
+  of blocking feeds and boards.
+- Backoff with a maximum below 100 ms no longer panics.
+- Rebuilt trees get fresh IDs, and per-panel state is keyed by target, so
+  scroll and snoozed toggles do not leak between panels.
+- Routine rotation no longer refetches everything every 25 s (DESIGN.md §6.5,
+  with a 5-minute full-refresh cap). Startup waits up to 1 s for the stream, so
+  the first load happens once.
+- A second review found ten more issues; all are fixed with tests:
+  - newly opened panels are no longer fetched twice;
+  - an added archive panel counts as rearranged, so newer saves no longer
+    drop it;
+  - only a clean end after at least 20 s counts as rotation, so a quick
+    service restart still refetches;
+  - split weights are normalized before narrowing to f32;
+  - tile actions carry their tree ID and are ignored after a switch or revert;
+  - only a resource-level 404 means deleted, and the generic
+    `unknown resource` 404 is an error;
+  - lists refetch per kind;
+  - feed changes refetch only boards that reference the feed;
+  - targets fetch with bounded concurrency after a probe;
+  - `client::request` and `client::stream` share one send helper;
+  - scheduler stream state is a single enum;
+  - layout entries and targets are computed once per frame, with a
+    single-pass tree walk.
+- Full local workflow passed again: 98 Rust tests, 15 workflow tests,
+  formatting, locked Clippy, build, and both Docker UID isolation cases. An X11
+  launch confirmed the cold-start auto-start and load, and no full refetch
+  across a stream rotation.
+
+## Session 20: layout saving, panel chrome, interaction tests
+
+Scope agreed: layout saving, panel chrome cleanup, and interaction tests; no
+API changes. Feeds, boards, and items stay read-only.
+
+- Layouts auto-save (DESIGN.md §6.4) through the existing `PUT /layouts/{name}`
+  after a 1-second pause, so a resize drag saves once. Failed saves show in the
+  layout bar and retry after 5 s. A save runs on its own worker; its own change
+  notice is not mistaken for another window's save.
+- Working copies follow saves made elsewhere unless that would lose unsaved
+  changes, a save in flight, or an archive panel. In that last case the bar
+  offers "Load saved version". With concurrent edits the last save wins.
+- **Save as…** (moves the Unsaved arrangement, or copies a saved one) and
+  **New layout…** use a name dialog with core name validation; existing names
+  are refused, so nothing is overwritten.
+- Panel chrome: removed the duplicate header row and Close button. **Show…**
+  sits in each tab bar; its entries are prefixed Feed:/Board:. Connection
+  errors are one line under the layout bar, with details and setup hints on
+  hover, so panels no longer shift.
+- Added `egui_kittest` 0.36.2 as a dev-dependency (6 dev-only crates, no egui
+  change). Nine interaction tests drive the real window through the
+  accessibility tree: sidebar click and reveal, context-menu split, layout
+  switch, tab close, tab-bar retarget, tab drag to split, auto-save, and Save
+  as (including a refused duplicate name). They were stable over five
+  repeated runs.
+- Not done (need API sign-off): layout delete/rename, per-user
+  last-layout preference, and sidebar counts for unplaced resources.
+
+## Suggested session 21
+
+Decide the API additions (layout delete/rename, item counts in
+`GET /feeds`/`GET /boards`). Then add sidebar drag-to-place and quick open
+(Ctrl+K), and begin editing with snooze and promote, extending the
+interaction tests alongside.

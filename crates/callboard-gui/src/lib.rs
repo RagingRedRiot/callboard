@@ -1,5 +1,13 @@
-//! Read-only desktop frontend and service connection helpers.
+//! Desktop frontend and service connection helpers. Only layouts are written.
+pub mod app;
 pub mod backend;
+pub mod events;
+pub mod sync;
+#[cfg(test)]
+mod testing;
+#[cfg(test)]
+mod ui_tests;
+pub mod workspace;
 
 use std::path::{Path, PathBuf};
 
