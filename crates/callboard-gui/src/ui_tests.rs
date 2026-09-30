@@ -1,14 +1,14 @@
 //! Interaction tests: drive the real window code through egui's accessibility
 //! tree (clicks, right-clicks, typing, tab drags) with a fake service.
 use crate::{
-    app::{App, LayoutOp, OpDone, SaveDone, SavePurpose, TestEnds},
-    backend::{Contents, Fetched, List, ListData, Request, Target},
+    app::{App, OpDone, SaveDone, SavePurpose, TestEnds, WriteOp},
+    backend::{Contents, Fetched, List, ListData, PromoteKind, Request, Target},
     workspace::{LayoutKey, SAVE_DELAY},
 };
 use callboard_core::{
     feed::Item,
     layout::{Axis, NamedLayout, Panel, Preferences},
-    store::{BoardContents, BoardInfo, BoardSummary, Feed, FeedInfo, FeedSummary},
+    store::{BoardContents, BoardInfo, BoardSummary, Feed, FeedInfo, FeedSummary, ItemViewState},
 };
 use eframe::egui;
 use egui_kittest::{Harness, kittest::Queryable};
@@ -96,9 +96,18 @@ fn answer(request: Request, saved: &Saved) -> Fetched {
                     info: feed_info(name),
                     items: vec![
                         serde_json::from_value::<Item>(json!({"key":"1","title":"Item"})).unwrap(),
+                        serde_json::from_value::<Item>(json!({"key":"2","title":"Later"})).unwrap(),
                     ],
                     manual_order: false,
-                    view_state: Default::default(),
+                    view_state: [(
+                        "2".to_owned(),
+                        ItemViewState {
+                            snoozed_until_ms: None,
+                            wake_on_update: true,
+                            snoozed: true,
+                        },
+                    )]
+                    .into(),
                 }),
                 Target::Board(2) => Contents::Board(BoardContents {
                     board: Some(BoardInfo {
@@ -156,7 +165,7 @@ impl Ui {
     }
 
     /// Layout operations sent so far, oldest first.
-    fn ops(&self) -> Vec<LayoutOp> {
+    fn ops(&self) -> Vec<WriteOp> {
         self.ends.ops.try_iter().collect()
     }
 
@@ -439,8 +448,8 @@ fn save_as_names_the_arrangement_and_switches_to_it() {
     );
 }
 
-fn remember(name: Option<&str>) -> LayoutOp {
-    LayoutOp::Remember {
+fn remember(name: Option<&str>) -> WriteOp {
+    WriteOp::Remember {
         name: name.map(str::to_owned),
     }
 }
@@ -507,7 +516,7 @@ fn rename_refuses_taken_names_then_renames_the_active_layout() {
     ui.harness.get_by_label("Layout name").type_text("Morning");
     ui.harness.get_by_label("Save").click();
     ui.settle();
-    let op = LayoutOp::Rename {
+    let op = WriteOp::Rename {
         from: "Day".into(),
         to: "Morning".into(),
     };
@@ -572,7 +581,7 @@ fn delete_asks_for_confirmation_then_opens_the_next_layout() {
     ui.settle();
     ui.harness.get_by_label("Delete").click();
     ui.settle();
-    let op = LayoutOp::Delete { name: "Day".into() };
+    let op = WriteOp::Delete { name: "Day".into() };
     assert_eq!(ui.ops(), std::slice::from_ref(&op));
     ui.harness.get_by_label("Deleting…");
     ui.saved.layouts.remove(0);
@@ -595,4 +604,122 @@ fn delete_asks_for_confirmation_then_opens_the_next_layout() {
     );
     assert!(ui.harness.query_by_label("Day").is_none());
     assert_eq!(ui.ops(), [remember(Some("Ops"))]);
+}
+
+#[test]
+fn feed_items_snooze_for_a_duration_or_until_they_change() {
+    let mut ui = Ui::new();
+    ui.ops();
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    ui.harness.get_by_label("Snooze").click();
+    ui.settle();
+    ui.harness.get_by_label("For 1 hour").click();
+    ui.settle();
+    let ops = ui.ops();
+    let [
+        WriteOp::Snooze {
+            feed,
+            key,
+            until_ms: Some(until),
+            on_update: false,
+        },
+    ] = ops.as_slice()
+    else {
+        panic!("expected one timed snooze, got {ops:?}")
+    };
+    assert_eq!((feed.as_str(), key.as_str()), ("a", "1"));
+    let hour = 60 * 60 * 1000;
+    assert!((before + hour..before + hour + 60_000).contains(until));
+    // Success refetches the feed without waiting for the change notice.
+    ui.ends
+        .ops_done
+        .send(OpDone {
+            op: ops[0].clone(),
+            result: Ok(None),
+        })
+        .unwrap();
+    ui.harness.step();
+    ui.harness.step();
+    let request = ui.ends.requests.try_recv().expect("a refetch");
+    assert_eq!(request.targets, [Target::Feed("a".into())]);
+    ui.ends.responses.send(answer(request, &ui.saved)).unwrap();
+    ui.settle();
+
+    ui.harness.get_by_label("Snooze").click();
+    ui.settle();
+    ui.harness.get_by_label("Until it changes").click();
+    ui.settle();
+    assert_eq!(
+        ui.ops(),
+        [WriteOp::Snooze {
+            feed: "a".into(),
+            key: "1".into(),
+            until_ms: None,
+            on_update: true,
+        }]
+    );
+}
+
+#[test]
+fn a_snoozed_item_can_be_unsnoozed_once_shown() {
+    let mut ui = Ui::new();
+    ui.ops();
+    assert!(ui.harness.query_by_label("Unsnooze").is_none());
+    ui.harness.get_by_label("Show snoozed (1)").click();
+    ui.settle();
+    ui.harness.get_by_label("Unsnooze").click();
+    ui.settle();
+    assert_eq!(
+        ui.ops(),
+        [WriteOp::Snooze {
+            feed: "a".into(),
+            key: "2".into(),
+            until_ms: None,
+            on_update: false,
+        }]
+    );
+}
+
+#[test]
+fn promoting_an_item_names_the_board_and_kind_and_reports_failure() {
+    let mut ui = Ui::new();
+    ui.ops();
+    ui.harness.get_by_label("Promote").click();
+    ui.settle();
+    // The submenu label carries an arrow; the sidebar has an "Inbox" entry too.
+    ui.harness
+        .query_all_by_label_contains("Inbox")
+        .find(|n| n.rect().min.x > 300.0)
+        .expect("the board submenu")
+        .click();
+    ui.settle();
+    ui.harness.get_by_label("As note").click();
+    ui.settle();
+    let op = WriteOp::Promote {
+        feed: "a".into(),
+        key: "1".into(),
+        board_id: 2,
+        kind: PromoteKind::Note,
+    };
+    assert_eq!(ui.ops(), std::slice::from_ref(&op));
+    ui.ends
+        .ops_done
+        .send(OpDone {
+            op,
+            result: Err("HTTP 404 Not Found: feed item not found: a/1".into()),
+        })
+        .unwrap();
+    ui.settle();
+    ui.harness
+        .get_by_label_contains("Could not promote the item: HTTP 404");
+    ui.harness.get_by_label("Dismiss").click();
+    ui.settle();
+    assert!(
+        ui.harness
+            .query_by_label_contains("Could not promote")
+            .is_none()
+    );
 }

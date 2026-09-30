@@ -5,7 +5,7 @@ A Linux per-user bulletin board for tool-submitted feeds, todos, and notes.
 
 The Linux service and CLI support feeds, boards, todos, and notes, backed by
 SQLite through SQLx. The API also provides layouts, promotion, feed view state,
-and change events. A desktop GUI (read-only apart from managing layouts) is available; MCP is not implemented
+and change events. A desktop GUI (managing layouts, snoozing, and promoting feed items) is available; MCP is not implemented
 yet.
 
 ```sh
@@ -178,9 +178,13 @@ under a new name and **New layout…** creates an empty one. **Rename…** and
 **Delete…** act on the active saved layout; deleting it switches to the next
 saved layout. Without any saved
 layout the window starts in an unnamed "Unsaved" arrangement. The
-deleted-board archive can be shown but is not stored in layouts. Saving
-and managing layouts are the GUI's only writes: feeds, boards, todos, and notes are
-read-only, and editing is subsequent work. Graphics dependencies are confined to the GUI
+deleted-board archive can be shown but is not stored in layouts.
+
+Each feed item has **Snooze** (for an hour, four hours, a day, a week, or until
+its content changes) and **Promote** (to a board as a todo or note). Snoozed
+items appear under **Show snoozed** with **Unsnooze**. A failed action shows a
+dismissible message under the layout bar. Board items are not yet editable in
+the GUI. Graphics dependencies are confined to the GUI
 crate; building `callboard` alone does not build eframe. A Wayland or X11 desktop
 with OpenGL support is required to launch the window.
 See [PROGRESS.md](PROGRESS.md) for session scope and the next step.

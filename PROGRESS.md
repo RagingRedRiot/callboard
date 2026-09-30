@@ -592,7 +592,26 @@ a matching service.
   mutation check confirmed the counts and remembering tests fail without the
   feature. Full local workflow passed; GUI suite stable over four runs.
 
+### Session 21, part 2: snooze and promote in the GUI
+
+- Feed items have **Snooze** (1 hour, 4 hours, 1 day, 1 week, or until the
+  content changes) and **Promote** (board, then todo or note); shown snoozed
+  items have **Unsnooze**. Requests use the existing PATCH and promote routes
+  on the ordered write worker (formerly layout-only, now `WriteOp`). Success
+  refetches the affected feed or board directly, so panels stay current while
+  the event stream is down; failures show a dismissible line under the layout
+  bar. The layout bar's "Read-only" label is gone.
+- Tests: backend snooze/unsnooze/promote round trips with a URL-shaped key
+  against a real service, and three interaction tests (timed and until-changed
+  snooze with the follow-up refetch, unsnooze of a shown snoozed item, promote
+  with a reported failure and dismissal).
+- Full local workflow passed; the GUI suite (59 tests) was stable over three
+  repeated runs. An X11 launch against an isolated seeded service ran without
+  errors and opened the preferred layout "Day" rather than the first by name
+  ("Alpha"); a screenshot could not be taken under Wayland, so the menus were
+  not inspected visually.
+
 ## Suggested next
 
-GUI editing: snooze and promote from feed panels, then sidebar drag-to-place
-and quick open (Ctrl+K).
+Board editing in the GUI (complete todos, edit, archive, reorder), then
+sidebar drag-to-place, drag-to-promote (§6.3), and quick open (Ctrl+K).

@@ -245,8 +245,7 @@ fn encode_segment(segment: &str) -> String {
         .collect()
 }
 
-/// Send a layout write and decode its JSON reply. Layout writes are the
-/// GUI's only mutations; feeds, boards, and items stay read-only.
+/// Send a write and decode its JSON reply.
 async fn write<T: DeserializeOwned>(
     paths: &Paths,
     auto: Option<&Path>,
@@ -314,6 +313,44 @@ pub async fn set_last_layout(
 ) -> Result<Preferences, String> {
     let body = serde_json::json!({ "last_layout": name });
     write(paths, auto, "PATCH", "/preferences", &body).await
+}
+
+/// Snooze or unsnooze a feed item (`PATCH /feeds/{name}/items/{key}`).
+/// `patch` holds only the fields to change (DESIGN.md §8.1).
+pub async fn patch_feed_item(
+    paths: &Paths,
+    auto: Option<&Path>,
+    feed: &str,
+    key: &str,
+    patch: &serde_json::Value,
+) -> Result<(), String> {
+    let resource = format!("/feeds/{feed}/items/{}", encode_segment(key));
+    write::<serde_json::Value>(paths, auto, "PATCH", &resource, patch)
+        .await
+        .map(|_| ())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromoteKind {
+    Todo,
+    Note,
+}
+
+/// Copy a feed item into a board as a todo or note (§5.3).
+pub async fn promote(
+    paths: &Paths,
+    auto: Option<&Path>,
+    feed: &str,
+    key: &str,
+    board_id: i64,
+    kind: PromoteKind,
+) -> Result<(), String> {
+    let resource = format!("/feeds/{feed}/items/{}/promote", encode_segment(key));
+    let body = serde_json::json!({ "board_id": board_id, "kind": kind });
+    write::<serde_json::Value>(paths, auto, "POST", &resource, &body)
+        .await
+        .map(|_| ())
 }
 
 #[cfg(test)]
@@ -579,6 +616,83 @@ mod tests {
         assert_eq!(lists.preferences, Preferences::default());
         assert_eq!(lists.layouts.len(), 1);
         let missing = set_last_layout(&service.paths, None, Some("Gone"))
+            .await
+            .unwrap_err();
+        assert!(missing.starts_with("HTTP 404"), "{missing}");
+        running.stop().await;
+    }
+
+    #[tokio::test]
+    async fn snoozes_and_promotes_items_with_url_shaped_keys() {
+        let service = Service::new();
+        let running = service.start().await;
+        let key = "https://example.com/pull/1?x=a b";
+        running
+            .send(
+                "PUT",
+                "/feeds/work",
+                json!({"items":[{"key":key,"title":"Review","url":"https://example.com"}]}),
+            )
+            .await;
+        let id = running
+            .send("POST", "/boards", json!({"name":"Inbox"}))
+            .await["id"]
+            .as_i64()
+            .unwrap();
+        patch_feed_item(
+            &service.paths,
+            None,
+            "work",
+            key,
+            &json!({"wake_on_update":true}),
+        )
+        .await
+        .unwrap();
+        let feed_state = |fetched: Fetched| match fetched.targets.into_iter().next() {
+            Some((_, Ok(Contents::Feed(feed)))) => feed.view_state,
+            _ => panic!("feed not loaded"),
+        };
+        let one = |target: Target| Request {
+            lists: BTreeSet::new(),
+            targets: vec![target],
+        };
+        let state =
+            feed_state(fetch(&service.paths, None, &one(Target::Feed("work".into()))).await);
+        assert!(state[key].snoozed && state[key].wake_on_update);
+        patch_feed_item(
+            &service.paths,
+            None,
+            "work",
+            key,
+            &json!({"snoozed_until_ms":null,"wake_on_update":false}),
+        )
+        .await
+        .unwrap();
+        let state =
+            feed_state(fetch(&service.paths, None, &one(Target::Feed("work".into()))).await);
+        assert!(!state.get(key).is_some_and(|s| s.snoozed));
+
+        promote(&service.paths, None, "work", key, id, PromoteKind::Note)
+            .await
+            .unwrap();
+        promote(&service.paths, None, "work", key, id, PromoteKind::Todo)
+            .await
+            .unwrap();
+        let Some((_, Ok(Contents::Board(board)))) =
+            fetch(&service.paths, None, &one(Target::Board(id)))
+                .await
+                .targets
+                .into_iter()
+                .next()
+        else {
+            panic!("board not loaded")
+        };
+        assert_eq!(board.todos[0].item.title, "Review");
+        assert_eq!(
+            board.notes[0].item.url.as_deref(),
+            Some("https://example.com")
+        );
+        let missing = promote(&service.paths, None, "work", "gone", id, PromoteKind::Todo)
             .await
             .unwrap_err();
         assert!(missing.starts_with("HTTP 404"), "{missing}");

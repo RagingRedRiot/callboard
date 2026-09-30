@@ -1,7 +1,8 @@
 //! The desktop window: resource sidebar, layout bar, and panel tree.
-//! The only writes manage layouts; feeds, boards, and items are read-only.
+//! Writes manage layouts and snooze or promote feed items; boards and their
+//! items are not yet editable.
 use crate::{
-    backend::{self, Contents, Fetched, ListData, Request, Target},
+    backend::{self, Contents, Fetched, ListData, PromoteKind, Request, Target},
     events::{self, Signal},
     sync::{Link, Outcome, POLL_INTERVAL, Scheduler},
     workspace::{self, LayoutEntry, LayoutKey, Layouts, Pane, Placement},
@@ -195,6 +196,8 @@ pub enum Action {
     /// Replace the active layout's working copy with its saved version.
     Revert,
     Refresh,
+    Write(WriteOp),
+    DismissWriteError,
     Prompt(PromptKind),
     /// Ask to confirm deleting the active saved layout.
     ConfirmDelete,
@@ -222,9 +225,9 @@ pub struct SaveDone {
     pub result: Result<NamedLayout, String>,
 }
 
-/// Layout management requests, sent in order on their own worker.
+/// Writes other than layout saves, sent in order on their own worker.
 #[derive(Debug, Clone, PartialEq)]
-pub enum LayoutOp {
+pub enum WriteOp {
     Rename {
         from: String,
         to: String,
@@ -236,10 +239,23 @@ pub enum LayoutOp {
     Remember {
         name: Option<String>,
     },
+    /// Set both snooze conditions; neither set unsnoozes the item.
+    Snooze {
+        feed: String,
+        key: String,
+        until_ms: Option<i64>,
+        on_update: bool,
+    },
+    Promote {
+        feed: String,
+        key: String,
+        board_id: i64,
+        kind: PromoteKind,
+    },
 }
 
 pub struct OpDone {
-    pub op: LayoutOp,
+    pub op: WriteOp,
     /// The renamed layout for a rename; `None` otherwise.
     pub result: Result<Option<NamedLayout>, String>,
 }
@@ -250,7 +266,7 @@ pub struct Channels {
     pub signals: mpsc::Receiver<Signal>,
     pub saves: mpsc::SyncSender<SaveJob>,
     pub saved: mpsc::Receiver<SaveDone>,
-    pub ops: mpsc::SyncSender<LayoutOp>,
+    pub ops: mpsc::SyncSender<WriteOp>,
     pub ops_done: mpsc::Receiver<OpDone>,
 }
 
@@ -288,6 +304,8 @@ pub struct App {
     pub delete_prompt: Option<DeletePrompt>,
     /// The layout last sent as the startup preference (or read from it).
     remembered: Option<LayoutKey>,
+    /// The last failed snooze or promotion, until dismissed.
+    pub write_error: Option<String>,
     worker_error: Option<String>,
     // A save completed while the current fetch might still contain an older
     // layout list. Discard that list and fetch again after the batch completes.
@@ -359,7 +377,7 @@ impl App {
                 }
             })
             .map_err(|e| e.to_string())?;
-        let (ops, op_jobs) = mpsc::sync_channel::<LayoutOp>(8);
+        let (ops, op_jobs) = mpsc::sync_channel::<WriteOp>(8);
         let (op_done, ops_done) = mpsc::sync_channel(8);
         let op_runtime = runtime()?;
         let op_paths = paths.clone();
@@ -372,19 +390,41 @@ impl App {
                     let (paths, auto) = (&op_paths, op_auto_start.as_deref());
                     let result = op_runtime.block_on(async {
                         match &op {
-                            LayoutOp::Rename { from, to } => {
+                            WriteOp::Rename { from, to } => {
                                 backend::rename_layout(paths, auto, from, to)
                                     .await
                                     .map(Some)
                             }
-                            LayoutOp::Delete { name } => backend::delete_layout(paths, auto, name)
+                            WriteOp::Delete { name } => backend::delete_layout(paths, auto, name)
                                 .await
                                 .map(|_| None),
-                            LayoutOp::Remember { name } => {
+                            WriteOp::Remember { name } => {
                                 backend::set_last_layout(paths, auto, name.as_deref())
                                     .await
                                     .map(|_| None)
                             }
+                            WriteOp::Snooze {
+                                feed,
+                                key,
+                                until_ms,
+                                on_update,
+                            } => {
+                                let patch = serde_json::json!({
+                                    "snoozed_until_ms": until_ms,
+                                    "wake_on_update": on_update,
+                                });
+                                backend::patch_feed_item(paths, auto, feed, key, &patch)
+                                    .await
+                                    .map(|_| None)
+                            }
+                            WriteOp::Promote {
+                                feed,
+                                key,
+                                board_id,
+                                kind,
+                            } => backend::promote(paths, auto, feed, key, *board_id, *kind)
+                                .await
+                                .map(|_| None),
                         }
                     });
                     if op_done.send(OpDone { op, result }).is_err() {
@@ -438,6 +478,7 @@ impl App {
             prompt: None,
             delete_prompt: None,
             remembered: None,
+            write_error: None,
             worker_error: None,
             discard_layout_list: false,
             pending_saves: 0,
@@ -563,21 +604,22 @@ impl App {
     }
 
     fn apply_op(&mut self, done: OpDone) {
-        if done.result.is_ok() && !matches!(done.op, LayoutOp::Remember { .. }) {
+        let layout_op = matches!(done.op, WriteOp::Rename { .. } | WriteOp::Delete { .. });
+        if done.result.is_ok() && layout_op {
             // A list fetched before this commit would bring the old name back.
             self.discard_layout_list |= self.scheduler.busy();
             self.scheduler.refresh_layouts();
         }
         match (done.op, done.result) {
-            (LayoutOp::Rename { from, .. }, Ok(Some(layout))) => {
+            (WriteOp::Rename { from, .. }, Ok(Some(layout))) => {
                 self.layouts.renamed(&from, &layout);
                 self.prompt = None;
             }
-            (LayoutOp::Delete { name }, Ok(_)) => {
+            (WriteOp::Delete { name }, Ok(_)) => {
                 self.layouts.deleted(&name);
                 self.delete_prompt = None;
             }
-            (LayoutOp::Rename { from, .. }, result) => {
+            (WriteOp::Rename { from, .. }, result) => {
                 self.layouts.end_op(&from);
                 if let Some(prompt) = &mut self.prompt {
                     prompt.waiting = false;
@@ -588,7 +630,7 @@ impl App {
                     );
                 }
             }
-            (LayoutOp::Delete { name }, Err(error)) => {
+            (WriteOp::Delete { name }, Err(error)) => {
                 self.layouts.end_op(&name);
                 if let Some(prompt) = &mut self.delete_prompt {
                     prompt.waiting = false;
@@ -597,7 +639,19 @@ impl App {
             }
             // The preference only picks the startup layout; a failure is not
             // worth interrupting the user for.
-            (LayoutOp::Remember { .. }, _) => (),
+            (WriteOp::Remember { .. }, _) => (),
+            // The change notice also triggers these refetches; asking directly
+            // keeps the panel current while the event stream is down.
+            (WriteOp::Snooze { feed, .. }, Ok(_)) => self.scheduler.want(Target::Feed(feed)),
+            (WriteOp::Promote { board_id, .. }, Ok(_)) => {
+                self.scheduler.want(Target::Board(board_id))
+            }
+            (WriteOp::Snooze { .. }, Err(error)) => {
+                self.write_error = Some(format!("Could not snooze the item: {error}"));
+            }
+            (WriteOp::Promote { .. }, Err(error)) => {
+                self.write_error = Some(format!("Could not promote the item: {error}"));
+            }
         }
     }
 
@@ -610,7 +664,7 @@ impl App {
             prompt.error = Some("Wait for the current save to finish".into());
             return;
         }
-        let op = LayoutOp::Delete {
+        let op = WriteOp::Delete {
             name: prompt.name.clone(),
         };
         match self.channels.ops.try_send(op) {
@@ -672,7 +726,7 @@ impl App {
                 prompt.error = Some("Wait for the current save to finish".into());
                 return;
             }
-            match self.channels.ops.try_send(LayoutOp::Rename {
+            match self.channels.ops.try_send(WriteOp::Rename {
                 from: from.clone(),
                 to: name,
             }) {
@@ -750,6 +804,13 @@ impl App {
             Action::Switch(key) => self.layouts.switch(key),
             Action::Revert => self.layouts.revert(),
             Action::Refresh => self.scheduler.refresh_all(),
+            Action::Write(op) => {
+                if self.channels.ops.try_send(op).is_err() {
+                    self.write_error =
+                        Some("The service writer is busy or stopped; try again".into());
+                }
+            }
+            Action::DismissWriteError => self.write_error = None,
             Action::Prompt(kind) => {
                 let text = match (kind, self.layouts.active_key()) {
                     (PromptKind::Rename, LayoutKey::Saved(name)) => name.clone(),
@@ -840,7 +901,7 @@ impl App {
             LayoutKey::Unsaved => None,
         };
         // Not retried: at worst the next startup opens a different layout.
-        let _ = self.channels.ops.try_send(LayoutOp::Remember { name });
+        let _ = self.channels.ops.try_send(WriteOp::Remember { name });
         self.remembered = Some(key);
     }
 
@@ -872,6 +933,23 @@ impl App {
             .show(ui, |ui| self.layout_bar(ui, now, &entries, &mut actions));
         if let Some(error) = self.worker_error.clone().or(self.cache.error.clone()) {
             egui::Panel::top("error_bar").show(ui, |ui| self.error_bar(ui, &error));
+        }
+        if let Some(error) = &self.write_error {
+            egui::Panel::top("write_error_bar").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let first_line = error.lines().next().unwrap_or_default();
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(first_line).color(ui.visuals().error_fg_color),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(error);
+                    if ui.small_button("Dismiss").clicked() {
+                        actions.push(Action::DismissWriteError);
+                    }
+                });
+            });
         }
         egui::Panel::left("resources")
             .default_size(240.0)
@@ -1006,8 +1084,6 @@ impl App {
                     ),
                 };
                 ui.label(text).on_hover_text(hover);
-                ui.separator();
-                ui.weak("Read-only");
             });
         });
     }
@@ -1300,7 +1376,7 @@ pub(crate) struct TestEnds {
     pub signals: mpsc::SyncSender<Signal>,
     pub saves: mpsc::Receiver<SaveJob>,
     pub saved: mpsc::SyncSender<SaveDone>,
-    pub ops: mpsc::Receiver<LayoutOp>,
+    pub ops: mpsc::Receiver<WriteOp>,
     pub ops_done: mpsc::SyncSender<OpDone>,
 }
 
@@ -1393,7 +1469,9 @@ impl Behavior<Pane> for Panes<'_> {
                     });
                 }
                 Some(Contents::Missing) => placeholder(ui, &pane.target),
-                Some(Contents::Feed(feed)) => show_feed(ui, feed, salt),
+                Some(Contents::Feed(feed)) => {
+                    show_feed(ui, feed, salt, &self.cache.boards, self.actions)
+                }
                 Some(Contents::Board(board)) => show_board(ui, board, salt),
             }
         });
@@ -1606,7 +1684,90 @@ fn reference(ui: &mut egui::Ui, resolved: Option<&ResolvedReference>) {
     }
 }
 
-fn show_feed(ui: &mut egui::Ui, feed: &Feed, salt: egui::Id) {
+/// Snooze choices: label and duration.
+const SNOOZE_FOR: [(&str, Duration); 4] = [
+    ("For 1 hour", Duration::from_secs(60 * 60)),
+    ("For 4 hours", Duration::from_secs(4 * 60 * 60)),
+    ("For 1 day", Duration::from_secs(24 * 60 * 60)),
+    ("For 1 week", Duration::from_secs(7 * 24 * 60 * 60)),
+];
+
+/// Snooze and promote actions for one feed item.
+fn item_actions(
+    ui: &mut egui::Ui,
+    feed: &str,
+    key: &str,
+    snoozed: bool,
+    boards: &[BoardSummary],
+    actions: &mut Vec<Action>,
+) {
+    let snooze = |until_ms: Option<i64>, on_update: bool| {
+        Action::Write(WriteOp::Snooze {
+            feed: feed.to_owned(),
+            key: key.to_owned(),
+            until_ms,
+            on_update,
+        })
+    };
+    ui.horizontal(|ui| {
+        if snoozed {
+            if ui.small_button("Unsnooze").clicked() {
+                actions.push(snooze(None, false));
+            }
+        } else {
+            ui.menu_button("Snooze", |ui| {
+                for (label, duration) in SNOOZE_FOR {
+                    if ui.button(label).clicked() {
+                        let until = now_ms().saturating_add(duration.as_millis() as i64);
+                        actions.push(snooze(Some(until), false));
+                        ui.close();
+                    }
+                }
+                if ui
+                    .button("Until it changes")
+                    .on_hover_text("Wake when the feed submits different content for it")
+                    .clicked()
+                {
+                    actions.push(snooze(None, true));
+                    ui.close();
+                }
+            });
+        }
+        ui.menu_button("Promote", |ui| {
+            if boards.is_empty() {
+                ui.weak("No boards yet");
+            }
+            for board in boards {
+                ui.push_id(board.info.id, |ui| {
+                    ui.menu_button(&board.info.name, |ui| {
+                        for (label, kind) in [
+                            ("As todo", PromoteKind::Todo),
+                            ("As note", PromoteKind::Note),
+                        ] {
+                            if ui.button(label).clicked() {
+                                actions.push(Action::Write(WriteOp::Promote {
+                                    feed: feed.to_owned(),
+                                    key: key.to_owned(),
+                                    board_id: board.info.id,
+                                    kind,
+                                }));
+                                ui.close();
+                            }
+                        }
+                    });
+                });
+            }
+        });
+    });
+}
+
+fn show_feed(
+    ui: &mut egui::Ui,
+    feed: &Feed,
+    salt: egui::Id,
+    boards: &[BoardSummary],
+    actions: &mut Vec<Action>,
+) {
     ui.label(format!(
         "{} items · submitted {} ago{}",
         feed.items.len(),
@@ -1655,6 +1816,9 @@ fn show_feed(ui: &mut egui::Ui, feed: &Feed, salt: egui::Id) {
                     if !item.tags.is_empty() {
                         ui.weak(item.tags.join(" · "));
                     }
+                    ui.push_id(&item.key, |ui| {
+                        item_actions(ui, &feed.info.name, &item.key, snoozed, boards, actions);
+                    });
                 });
             }
         });
