@@ -326,7 +326,6 @@ dependencies = [
  "callboard-core",
  "eframe",
  "egui_kittest",
- "egui_tiles",
  "humantime",
  "rustix 1.1.5",
  "serde",
@@ -842,18 +841,6 @@ dependencies = [
  "log",
  "serde",
  "toml",
-]
-
-[[package]]
-name = "egui_tiles"
-version = "0.17.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87147a0a2f03415a3082a92dba79062912d70d555f2495a54d16a7be2c81ac55"
-dependencies = [
- "ahash",
- "egui",
- "itertools",
- "log",
 ]
 
 [[package]]

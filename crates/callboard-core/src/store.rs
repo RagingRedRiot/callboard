@@ -443,22 +443,22 @@ impl Store {
         }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let updated_at_ms = now_ms()?;
-        sqlx::query("INSERT INTO layouts(name, tree_json, updated_at_ms) VALUES(?, ?, ?) ON CONFLICT(name) DO UPDATE SET tree_json = excluded.tree_json, updated_at_ms = excluded.updated_at_ms")
-            .bind(name).bind(serde_json::to_string(&layout.tree)?).bind(updated_at_ms).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO layouts(name, layout_json, updated_at_ms) VALUES(?, ?, ?) ON CONFLICT(name) DO UPDATE SET layout_json = excluded.layout_json, updated_at_ms = excluded.updated_at_ms")
+            .bind(name).bind(serde_json::to_string(layout)?).bind(updated_at_ms).execute(&mut *tx).await?;
         tx.commit().await?;
         self.notify(Change::Layout {
             name: name.to_owned(),
         });
         Ok(crate::layout::NamedLayout {
             name: name.to_owned(),
-            tree: layout.tree.clone(),
+            layout: layout.clone(),
             updated_at_ms,
         })
     }
 
     pub async fn list_layouts(&self) -> Result<Vec<crate::layout::NamedLayout>, StoreError> {
         let rows = sqlx::query_as::<_, (String, String, i64)>(
-            "SELECT name, tree_json, updated_at_ms FROM layouts ORDER BY name",
+            "SELECT name, layout_json, updated_at_ms FROM layouts ORDER BY name",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -466,7 +466,7 @@ impl Store {
             .map(|(name, json, updated_at_ms)| {
                 Ok(crate::layout::NamedLayout {
                     name,
-                    tree: serde_json::from_str(&json)?,
+                    layout: serde_json::from_str(&json)?,
                     updated_at_ms,
                 })
             })
@@ -502,7 +502,7 @@ impl Store {
         crate::layout::validate_name(new_name)?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query_as::<_, (String, i64)>(
-            "SELECT tree_json, updated_at_ms FROM layouts WHERE name = ?",
+            "SELECT layout_json, updated_at_ms FROM layouts WHERE name = ?",
         )
         .bind(name)
         .fetch_optional(&mut *tx)
@@ -512,7 +512,7 @@ impl Store {
             tx.commit().await?;
             return Ok(crate::layout::NamedLayout {
                 name: name.to_owned(),
-                tree: serde_json::from_str(&row.0)?,
+                layout: serde_json::from_str(&row.0)?,
                 updated_at_ms: row.1,
             });
         }
@@ -539,7 +539,7 @@ impl Store {
         }
         Ok(crate::layout::NamedLayout {
             name: new_name.to_owned(),
-            tree: serde_json::from_str(&row.0)?,
+            layout: serde_json::from_str(&row.0)?,
             updated_at_ms,
         })
     }

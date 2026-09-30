@@ -37,7 +37,7 @@ pub enum Kind {
 
 #[derive(Subcommand)]
 pub enum LayoutCommand {
-    /// Create or replace a named layout with a {"tree": ...} object from stdin.
+    /// Create or replace a named layout with a {"view": ..., "cards": [...]} object from stdin.
     Save {
         name: String,
     },

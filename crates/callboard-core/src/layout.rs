@@ -1,49 +1,58 @@
-//! Toolkit-independent persisted panel trees. Targets need not currently exist.
+//! Toolkit-independent persisted canvas layouts (DESIGN.md §6.4). Card targets
+//! need not currently exist.
 use crate::feed::validate_feed_name;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 pub const MAX_LAYOUT_BYTES: usize = 64 * 1024;
-pub const MAX_LAYOUT_NODES: usize = 256;
-pub const MAX_LAYOUT_DEPTH: usize = 16;
+pub const MAX_CARDS: usize = 256;
+/// Largest magnitude of any coordinate, in canvas units.
+pub const MAX_COORDINATE: f64 = 1_000_000.0;
+/// Largest card width or height, in canvas units.
+pub const MAX_CARD_SIZE: f64 = 100_000.0;
+
+/// The arrangement of cards on the canvas.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Layout {
+    /// The canvas point shown at the top-left of the canvas area.
+    pub view: View,
+    /// Back to front: the last card is drawn on top.
+    pub cards: Vec<Card>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct View {
+    pub x: f64,
+    pub y: f64,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Layout {
-    pub tree: Panel,
+pub struct Card {
+    pub target: Target,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    /// The expanded height, kept while the card is collapsed.
+    pub height: f64,
+    pub collapsed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// What a card shows. The deleted-board archive is not a layout target.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Panel {
-    Empty {},
-    Feed {
-        name: String,
-    },
-    Board {
-        id: i64,
-    },
-    Split {
-        axis: Axis,
-        children: Vec<Panel>,
-        weights: Vec<f64>,
-    },
-    Tabs {
-        children: Vec<Panel>,
-        active: usize,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Axis {
-    Horizontal,
-    Vertical,
+pub enum Target {
+    Feed { name: String },
+    Board { id: i64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NamedLayout {
     pub name: String,
-    pub tree: Panel,
+    #[serde(flatten)]
+    pub layout: Layout,
     pub updated_at_ms: i64,
 }
 
@@ -78,57 +87,55 @@ pub fn validate_name(name: &str) -> Result<(), LayoutError> {
     Ok(())
 }
 
+fn coordinate(value: f64) -> bool {
+    value.is_finite() && value.abs() <= MAX_COORDINATE
+}
+
+fn size(value: f64) -> bool {
+    value.is_finite() && (1.0..=MAX_CARD_SIZE).contains(&value)
+}
+
 impl Layout {
     pub fn validate(&self) -> Result<(), LayoutError> {
-        let mut count = 0;
-        self.tree.validate(1, &mut count)
+        if !coordinate(self.view.x) || !coordinate(self.view.y) {
+            return Err(LayoutError(
+                "view coordinates must be finite with magnitude at most 1,000,000",
+            ));
+        }
+        if self.cards.len() > MAX_CARDS {
+            return Err(LayoutError("a layout holds at most 256 cards"));
+        }
+        let mut targets = BTreeSet::new();
+        for card in &self.cards {
+            card.target.validate()?;
+            if !targets.insert(&card.target) {
+                return Err(LayoutError("a layout holds one card per feed or board"));
+            }
+            if !coordinate(card.x) || !coordinate(card.y) {
+                return Err(LayoutError(
+                    "card coordinates must be finite with magnitude at most 1,000,000",
+                ));
+            }
+            if !size(card.width) || !size(card.height) {
+                return Err(LayoutError(
+                    "card width and height must be finite, from 1 to 100,000",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
-impl Panel {
-    fn validate(&self, depth: usize, count: &mut usize) -> Result<(), LayoutError> {
-        *count += 1;
-        if depth > MAX_LAYOUT_DEPTH || *count > MAX_LAYOUT_NODES {
-            return Err(LayoutError("tree exceeds 16 levels or 256 nodes"));
-        }
-        let children = match self {
-            Self::Empty {} if depth == 1 => return Ok(()),
-            Self::Empty {} => return Err(LayoutError("empty is only valid as the root")),
+impl Target {
+    fn validate(&self) -> Result<(), LayoutError> {
+        match self {
             Self::Feed { name } => {
-                return validate_feed_name(name).map_err(|_| LayoutError("invalid feed target"));
+                validate_feed_name(name).map_err(|_| LayoutError("invalid feed target"))
             }
-            Self::Board { id } if *id > 1 => return Ok(()),
-            Self::Board { .. } => {
-                return Err(LayoutError(
-                    "board target must be a user board ID greater than 1",
-                ));
-            }
-            Self::Split {
-                children, weights, ..
-            } => {
-                if children.len() < 2
-                    || children.len() != weights.len()
-                    || weights.iter().any(|v| !v.is_finite() || *v <= 0.0)
-                    || !weights.iter().sum::<f64>().is_finite()
-                {
-                    return Err(LayoutError(
-                        "split requires at least two children and one finite positive weight per child",
-                    ));
-                }
-                children
-            }
-            Self::Tabs { children, active } => {
-                if children.is_empty() || *active >= children.len() {
-                    return Err(LayoutError(
-                        "tabs require children and an in-range active index",
-                    ));
-                }
-                children
-            }
-        };
-        for child in children {
-            child.validate(depth + 1, count)?;
+            Self::Board { id } if *id > 1 => Ok(()),
+            Self::Board { .. } => Err(LayoutError(
+                "board target must be a user board ID greater than 1",
+            )),
         }
-        Ok(())
     }
 }

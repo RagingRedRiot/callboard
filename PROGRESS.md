@@ -674,10 +674,49 @@ visible corner mark; the front or focused card needs a highlight; the title
 bar needs its own background. Test clicks must use positions from current
 geometry — a pan or resize moves every later target.
 
+## Canvas Phases 1–3 (merged)
+
+Merged at the user's choice: the layout format change breaks the tiled GUI, so
+format, canvas model, and drawing landed together and were committed only when
+everything passed. Stopped at the Phase 3 review point.
+
+- Core: `Layout { view, cards }` with `Card { target, x, y, width, height,
+  collapsed }`, back to front; validation of finite coordinates (≤ 1,000,000),
+  sizes (1–100,000), ≤ 256 cards, and one card per target. `NamedLayout`
+  flattens the layout. Migration 0007 deletes saved trees, clears the
+  preference, and renames `tree_json` to `layout_json`; an upgrade test starts
+  from a version-6 database with a saved tree and a preference.
+- Service and CLI accept the new body unchanged in shape of routes; tests
+  cover validation errors, persistence, and the CLI round trip.
+- GUI model (`workspace.rs`): `Canvas` with place (centred, cascaded, never a
+  second card), reveal (raise, expand, least pan), move, resize (minimum
+  220 × 120), collapse, close, retarget (refused onto a placed target), pan,
+  and show all. Saved coordinates are whole units; smaller saved cards grow to
+  the minimum, and comparisons use that normal form. `Layouts` logic is
+  unchanged apart from comparing layouts.
+- GUI drawing (`app.rs`): cards drawn back to front inside the canvas area
+  with a full-card blocker, title bar (title with counts, Show…, −/+, ×),
+  body, resize grips, a corner mark, and a front-card highlight. Raising reads
+  presses from events; the wheel scrolls only the topmost card; empty-canvas
+  drags and wheels pan. Sidebar: Add card…, click to place or reveal,
+  right-click Show/Remove card, drag onto the canvas to place at the drop
+  point. Layout bar: Show all. `egui_tiles` and the Phase 0 prototype removed.
+- Found on the desktop and fixed with regression tests: ▾ and ✕ are missing
+  from egui's fonts (now −, +, ×); and a button on a card behind others needed
+  two clicks, because egui mixes a salted child's position into its widget
+  ids, so raising a card changed its buttons' ids between press and release.
+  Cards now use explicit ids (`UiBuilder::id`).
+- Tests: 68 GUI tests, including 13 new canvas interaction tests (placement,
+  reveal with pan, context menu, close, Show… with disabled targets, title
+  drag saving once, corner resize to the minimum, collapse, overlap raise
+  including a one-frame click, pan by drag and wheel versus card scrolling,
+  Show all, sidebar drag-to-place, background-card buttons).
+- Desktop: placed cards by click and drag, raised, moved, collapsed, panned,
+  saved as a layout, and restarted the GUI to confirm view, positions, order,
+  and collapse state restore. Full local workflow passed.
+
 ## Suggested next
 
-Canvas GUI: DESIGN.md §6 now specifies a pannable canvas of overlapping,
-resizable, collapsible cards (one per feed or board) instead of splits and
-tabs. The phased implementation plan is in [docs/canvas-plan.md](docs/canvas-plan.md),
-starting with a rendering prototype. Board editing, drag-to-promote, and quick
-open (Ctrl+K) follow the canvas.
+Canvas Phases 4–5 remain from docs/canvas-plan.md: broaden interaction tests
+where useful and polish from the user's first real use. Then board editing,
+drag-to-promote (§6.3), and quick open (Ctrl+K).

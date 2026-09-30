@@ -276,10 +276,9 @@ pub async fn save_layout(
     paths: &Paths,
     auto: Option<&Path>,
     name: &str,
-    tree: &callboard_core::layout::Panel,
+    layout: &callboard_core::layout::Layout,
 ) -> Result<NamedLayout, String> {
-    let layout = callboard_core::layout::Layout { tree: tree.clone() };
-    write(paths, auto, "PUT", &layout_resource(name), &layout).await
+    write(paths, auto, "PUT", &layout_resource(name), layout).await
 }
 
 /// Rename without replacing another layout (`PATCH /layouts/{name}`).
@@ -433,7 +432,8 @@ mod tests {
             .send(
                 "PUT",
                 "/layouts/Day",
-                json!({"tree":{"kind":"board","id":id}}),
+                json!({"view":{"x":0,"y":0},"cards":[{"target":{"kind":"board","id":id},
+                    "x":0,"y":0,"width":360,"height":300,"collapsed":false}]}),
             )
             .await;
         let view = fetch(
@@ -563,24 +563,27 @@ mod tests {
     async fn saves_layouts_under_encoded_names_and_reports_rejections() {
         let service = Service::new();
         let running = service.start().await;
-        let tree: callboard_core::layout::Panel =
-            serde_json::from_value(json!({"kind":"feed","name":"reviews"})).unwrap();
+        let card = |target: serde_json::Value| -> callboard_core::layout::Layout {
+            serde_json::from_value(json!({"view":{"x":0,"y":0},"cards":[{"target":target,
+                "x":0,"y":0,"width":420,"height":520,"collapsed":false}]}))
+            .unwrap()
+        };
+        let layout = card(json!({"kind":"feed","name":"reviews"}));
         let name = "Day / night ✓ 100%";
-        let saved = save_layout(&service.paths, None, name, &tree)
+        let saved = save_layout(&service.paths, None, name, &layout)
             .await
             .unwrap();
         assert_eq!(saved.name, name);
-        assert_eq!(saved.tree, tree);
+        assert_eq!(saved.layout, layout);
         let view = fetch(&service.paths, None, &all(&[])).await;
         assert_eq!(loaded(view).layouts[0].name, name);
-        let invalid: callboard_core::layout::Panel =
-            serde_json::from_value(json!({"kind":"board","id":1})).unwrap();
+        let invalid = card(json!({"kind":"board","id":1}));
         let error = save_layout(&service.paths, None, "Bad", &invalid)
             .await
             .unwrap_err();
         assert!(error.starts_with("HTTP 400"), "{error}");
 
-        let other = save_layout(&service.paths, None, "Other", &tree)
+        let other = save_layout(&service.paths, None, "Other", &layout)
             .await
             .unwrap();
         let taken = rename_layout(&service.paths, None, name, &other.name)
@@ -595,7 +598,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(renamed.name, "Evening ✓");
-        assert_eq!(renamed.tree, tree);
+        assert_eq!(renamed.layout, layout);
         let lists = loaded(fetch(&service.paths, None, &all(&[])).await);
         assert_eq!(
             lists.preferences.last_layout.as_deref(),

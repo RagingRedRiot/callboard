@@ -872,15 +872,26 @@ async fn layout_api_saves_replaces_and_rejects_invalid_requests_atomically() {
         (200, json!([]))
     );
     let path = "/layouts/Work%20%2F%20day";
-    let tree = json!({"kind":"tabs","active":1,"children":[{"kind":"feed","name":"missing"},{"kind":"board","id":999}]});
-    let (status, saved) = f.api("PUT", path, json!({"tree":tree})).await;
+    // Targets need not exist; cards are stored back to front as sent.
+    let cards = json!([
+        {"target":{"kind":"feed","name":"missing"},"x":0.0,"y":0.0,"width":420.0,"height":560.0,"collapsed":false},
+        {"target":{"kind":"board","id":999},"x":440.0,"y":-20.0,"width":360.0,"height":300.0,"collapsed":true}
+    ]);
+    let body = json!({"view":{"x":-40.0,"y":10.0},"cards":cards});
+    let (status, saved) = f.api("PUT", path, body.clone()).await;
     assert_eq!(status, 200, "{saved}");
     assert_eq!(saved["name"], "Work / day");
-    assert_eq!(saved["tree"], tree);
+    assert_eq!(saved["view"], body["view"]);
+    assert_eq!(saved["cards"], cards);
+    let card = |target: Value| json!({"target":target,"x":0,"y":0,"width":420,"height":560,"collapsed":false});
+    let feed = json!({"kind":"feed","name":"a"});
     for invalid in [
         json!({}),
-        json!({"tree":{"kind":"tabs","active":2,"children":[]}}),
-        json!({"tree":{"kind":"board","id":1}}),
+        json!({"tree":{"kind":"empty"}}),
+        json!({"view":{"x":0,"y":0},"cards":[card(json!({"kind":"board","id":1}))]}),
+        json!({"view":{"x":0,"y":0},"cards":[card(feed.clone()), card(feed.clone())]}),
+        json!({"view":{"x":2e6,"y":0},"cards":[]}),
+        json!({"view":{"x":0,"y":0},"cards":[],"extra":1}),
     ] {
         assert_eq!(f.api("PUT", path, invalid).await.0, 400);
         assert_eq!(
@@ -889,15 +900,23 @@ async fn layout_api_saves_replaces_and_rejects_invalid_requests_atomically() {
         );
     }
     assert_eq!(
-        f.api("PUT", "/layouts/%FF", json!({"tree":{"kind":"empty"}}))
-            .await
-            .0,
+        f.api(
+            "PUT",
+            "/layouts/%FF",
+            json!({"view":{"x":0,"y":0},"cards":[]})
+        )
+        .await
+        .0,
         400
     );
     assert_eq!(
-        f.api("PUT", "/layouts/%20", json!({"tree":{"kind":"empty"}}))
-            .await
-            .0,
+        f.api(
+            "PUT",
+            "/layouts/%20",
+            json!({"view":{"x":0,"y":0},"cards":[]})
+        )
+        .await
+        .0,
         400
     );
     assert_eq!(f.api("POST", "/layouts", json!({})).await.0, 405);
@@ -906,13 +925,15 @@ async fn layout_api_saves_replaces_and_rejects_invalid_requests_atomically() {
         f.api(
             "PUT",
             path,
-            json!({"tree":{"kind":"feed","name":"x".repeat(65536)}})
+            json!({"view":{"x":0,"y":0},"cards":[card(json!({"kind":"feed","name":"x".repeat(65536)}))]})
         )
         .await
         .0,
         413
     );
-    let (status, replaced) = f.api("PUT", path, json!({"tree":{"kind":"empty"}})).await;
+    let (status, replaced) = f
+        .api("PUT", path, json!({"view":{"x":0,"y":0},"cards":[]}))
+        .await;
     assert_eq!(status, 200);
     assert_eq!(
         f.api("GET", "/layouts", json!(null)).await.1,
@@ -927,7 +948,7 @@ async fn layout_rename_delete_preferences_and_list_counts() {
     let f = Fixture::new();
     let mut service = f.command().arg("serve").spawn().unwrap();
     f.wait_ready().await;
-    let empty = json!({"tree":{"kind":"empty"}});
+    let empty = json!({"view":{"x":0.0,"y":0.0},"cards":[]});
     assert_eq!(f.api("PUT", "/layouts/Day", empty.clone()).await.0, 200);
     assert_eq!(f.api("PUT", "/layouts/Night", empty.clone()).await.0, 200);
     assert_eq!(
@@ -976,7 +997,7 @@ async fn layout_rename_delete_preferences_and_list_counts() {
         .await;
     assert_eq!(status, 200, "{renamed}");
     assert_eq!(renamed["name"], "Work / day");
-    assert_eq!(renamed["tree"], empty["tree"]);
+    assert_eq!(renamed["cards"], empty["cards"]);
     assert_eq!(
         f.api("GET", "/preferences", json!(null)).await.1,
         json!({"last_layout":"Work / day"})
@@ -1086,9 +1107,13 @@ async fn event_stream_delivers_committed_changes_and_reconnects_with_resync() {
                 .contains("event: resync")
         );
         assert_eq!(
-            f.api("PUT", "/layouts/Day", json!({"tree":{"kind":"empty"}}))
-                .await
-                .0,
+            f.api(
+                "PUT",
+                "/layouts/Day",
+                json!({"view":{"x":0,"y":0},"cards":[]})
+            )
+            .await
+            .0,
             200
         );
         let changed = tokio::time::timeout(Duration::from_secs(2), body.frame())
@@ -1341,23 +1366,28 @@ async fn feed_controls_promotion_and_layout_cli_roundtrip_literal_keys() {
     assert!(failed.stdout.is_empty());
     assert!(String::from_utf8_lossy(&failed.stderr).contains("404"));
     let name = "Day / é+%2F?#";
-    let layout = json!({"tree":{"kind":"board","id":board}}).to_string();
+    let layout = json!({"view":{"x":0,"y":0},"cards":[{"target":{"kind":"board","id":board},
+        "x":0,"y":0,"width":360,"height":300,"collapsed":false}]})
+    .to_string();
     let out = f.cli(&["layout", "save", name], &layout).await;
     assert!(out.status.success());
     assert_eq!(json_output(&out)["name"], name);
     assert_eq!(
-        json_output(&f.cli(&["layouts"], "").await)[0]["tree"]["id"],
+        json_output(&f.cli(&["layouts"], "").await)[0]["cards"][0]["target"]["id"],
         board
     );
     assert!(
-        f.cli(&["layout", "save", name], r#"{"tree":{"kind":"empty"}}"#)
-            .await
-            .status
-            .success()
+        f.cli(
+            &["layout", "save", name],
+            r#"{"view":{"x":0,"y":0},"cards":[]}"#
+        )
+        .await
+        .status
+        .success()
     );
     let layouts = json_output(&f.cli(&["layouts"], "").await);
     assert_eq!(layouts.as_array().unwrap().len(), 1);
-    assert_eq!(layouts[0]["tree"]["kind"], "empty");
+    assert_eq!(layouts[0]["cards"], json!([]));
     assert!(
         !f.cli(&["layout", "save", name], "{}")
             .await
@@ -1430,7 +1460,7 @@ async fn invalid_view_cli_input_never_starts_service() {
         (vec!["layout", "save", "Day"], "{}".to_owned()),
         (
             vec!["layout", "save", "Day"],
-            r#"{"tree":{"kind":"tabs","children":[],"active":0}}"#.to_owned(),
+            r#"{"view":{"x":0,"y":0},"cards":[{"target":{"kind":"board","id":1},"x":0,"y":0,"width":1,"height":1,"collapsed":false}]}"#.to_owned(),
         ),
         (vec!["layout", "save", "Day"], " ".repeat(65537)),
     ] {

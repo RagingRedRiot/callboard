@@ -64,7 +64,7 @@ printf '%s' '{"position":0}' | callboard feed patch reviews 'item-key'
 printf '%s' '{"reset_order":true}' | callboard feed patch reviews 'item-key'
 callboard feed promote reviews 'item-key' inbox
 callboard feed promote reviews 'item-key' inbox --kind note
-printf '%s' '{"tree":{"kind":"feed","name":"reviews"}}' | callboard layout save 'Review day'
+printf '%s' '{"view":{"x":0,"y":0},"cards":[{"target":{"kind":"feed","name":"reviews"},"x":0,"y":0,"width":420,"height":520,"collapsed":false}]}' | callboard layout save 'Review day'
 callboard layouts
 callboard layout rename 'Review day' 'Reviews'
 callboard layout rm 'Reviews'
@@ -74,10 +74,11 @@ Pass literal item keys and layout names, including URLs, Unicode, and `%`;
 the CLI encodes them for the API. Feed PATCH accepts `snoozed_until_ms` (UTC Unix
 milliseconds or null), `wake_on_update`, `position`, and `reset_order`. To clear
 both snooze conditions, send `{"snoozed_until_ms":null,"wake_on_update":false}`.
-Feed patch input is limited to 16 KiB. `layout save NAME` accepts a `{"tree":...}`
-object up to 64 KiB and replaces that layout atomically. `layouts` returns all
-saved trees. `layout rename` never replaces an existing layout, and `layout rm`
-reports whether the layout existed. See DESIGN.md for the panel-tree schema. These commands support
+Feed patch input is limited to 16 KiB. `layout save NAME` accepts a layout
+object (`view` and back-to-front `cards`) up to 64 KiB and replaces that layout
+atomically. `layouts` returns all saved layouts. `layout rename` never replaces
+an existing layout, and `layout rm` reports whether the layout existed. See
+DESIGN.md §6.4 for the layout schema. These commands support
 `--no-auto-start` and the same JSON output/error conventions as other commands.
 
 From a stable installed binary path, `callboard setup --print` previews the
@@ -150,23 +151,31 @@ target/debug/callboard-gui
 must use the same XDG and CALLBOARD_SOCKET_DIR settings. Auto-start uses the
 same kernel UID checks, data lock, and process lifecycle as CLI requests.
 
-The window arranges feeds and boards as panels in splits and tab groups
-(`egui_tiles`). Click a sidebar entry to show it (revealing it if already
-placed). Use **Add panel…** in the sidebar to choose a resource and open a new
-tab, split right/below, or show it in the focused panel. The same choices are
-available by right-clicking a resource. Drag tabs to rearrange, use **Show…** in a tab bar to retarget the
-active panel, and close panels from their tab. The sidebar lists saved layouts, feeds
-with error/stale markers, and boards, each with its item count (visible and
-snoozed for feeds). The GUI opens the layout that was active when it last ran,
-or else the first saved layout by name. Panels whose feed or board was
-deleted stay in place as placeholders.
+The window is a canvas of cards, one per feed or board (DESIGN.md §6.1).
+Cards overlap; clicking anywhere on a card brings it to the front. Drag a
+card's title bar to move it, drag its right or bottom edge or corner to resize
+it, **−** collapses it to its title bar (which keeps showing counts) and **+**
+expands it, and **×** removes it from the layout. **Show…** in the title bar
+points the card at another feed or board; targets that already have a card are
+disabled. A long feed scrolls inside its card.
+
+Drag empty canvas, or use the wheel over it (Shift + wheel for horizontal), to
+pan; over a card, the wheel scrolls that card. **Show all** in the layout bar
+pans back to the cards. Clicking a sidebar entry pans to its card or places a
+new one in the middle of the view; **Add card…** offers the same, the
+right-click menu can also remove a card, and dragging an entry onto the canvas
+places its card at the drop point. The sidebar lists saved layouts, feeds with
+error/stale markers, and boards, each with its item count (visible and snoozed
+for feeds). The GUI opens the layout that was active when it last ran, or else
+the first saved layout by name. Cards whose feed or board was deleted stay in
+place as placeholders.
 
 The GUI subscribes to `GET /events` and refetches only what changed, handling
 the initial resync, lag resyncs, and reconnects with backoff. Routine stream
 rotation does not refetch everything; see DESIGN.md §6.5. While the stream is
 down for more than two seconds it polls every five seconds instead; the status
-bar shows Live, Connecting, or Polling. A failed refetch keeps a panel's last
-loaded contents and retries that panel alone after five seconds. HTTP(S) links
+bar shows Live, Connecting, or Polling. A failed refetch keeps a card's last
+loaded contents and retries that card alone after five seconds. HTTP(S) links
 open only when clicked; other URL schemes display as text.
 
 Arrangement changes save to the active layout automatically after a

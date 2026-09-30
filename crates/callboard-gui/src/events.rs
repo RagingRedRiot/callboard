@@ -316,7 +316,11 @@ mod tests {
         assert_eq!(next(&mut rx).await, Signal::Notice(Notice::Resync));
         drop(rx);
         running
-            .send("PUT", "/layouts/Day", json!({"tree":{"kind":"empty"}}))
+            .send(
+                "PUT",
+                "/layouts/Day",
+                json!({"view":{"x":0,"y":0},"cards":[]}),
+            )
             .await;
         tokio::time::timeout(Duration::from_secs(10), worker)
             .await

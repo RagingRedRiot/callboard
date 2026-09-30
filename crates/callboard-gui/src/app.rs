@@ -5,17 +5,16 @@ use crate::{
     backend::{self, Contents, Fetched, ListData, PromoteKind, Request, Target},
     events::{self, Signal},
     sync::{Link, Outcome, POLL_INTERVAL, Scheduler},
-    workspace::{self, LayoutEntry, LayoutKey, Layouts, Pane, Placement},
+    workspace::{self, CardState, LayoutEntry, LayoutKey, Layouts, TITLE_HEIGHT},
 };
 use callboard::lifecycle::Paths;
 use callboard_core::{
-    layout::{NamedLayout, Panel},
+    layout::{Layout, NamedLayout},
     store::{
         BoardContents, BoardSummary, Feed, FeedInfo, FeedSummary, ItemViewState, ResolvedReference,
     },
 };
 use eframe::egui;
-use egui_tiles::{Behavior, TileId, Tiles, UiResponse};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -165,7 +164,7 @@ impl Cache {
         }
     }
 
-    fn tab_title(&self, target: &Target) -> String {
+    fn card_title(&self, target: &Target) -> String {
         let mut title = self.title(target);
         if let Some(counts) = self.counts(target) {
             title.push_str(&format!(" ({})", counts.shown));
@@ -177,23 +176,37 @@ impl Cache {
     }
 }
 
+/// A change to one card, from its own controls on the canvas.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CardOp {
+    Raise,
+    Move(egui::Vec2),
+    /// The card's new expanded size; the minimum is enforced.
+    Resize(egui::Vec2),
+    ToggleCollapsed,
+    Close,
+    Retarget(Target),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
-    /// Reveal a placed target, or open it as a tab.
+    /// Reveal the target's card, or place one in the middle of the view.
     Show(Target),
-    Place(Target, Placement),
-    /// Tile actions name the tree they came from: tile IDs restart in each
-    /// tree, so an action queued before a layout switch or revert in the same
-    /// frame must not hit a panel of the new tree.
-    Retarget {
-        tree: egui::Id,
-        tile: TileId,
+    /// Place the target's card with its top-left at a canvas point (a drop
+    /// from the sidebar); an existing card moves there.
+    PlaceAt(Target, egui::Pos2),
+    /// Canvas actions name the canvas they came from, so one queued before a
+    /// layout switch or revert in the same frame never hits the new canvas.
+    Card {
+        canvas: egui::Id,
         target: Target,
+        op: CardOp,
     },
-    Close {
-        tree: egui::Id,
-        tile: TileId,
+    Pan {
+        canvas: egui::Id,
+        delta: egui::Vec2,
     },
+    ShowAll,
     Switch(LayoutKey),
     /// Replace the active layout's working copy with its saved version.
     Revert,
@@ -218,7 +231,7 @@ pub enum SavePurpose {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SaveJob {
     pub name: String,
-    pub tree: Panel,
+    pub layout: Layout,
     pub purpose: SavePurpose,
 }
 
@@ -310,6 +323,9 @@ pub struct App {
     remembered: Option<LayoutKey>,
     /// The last failed snooze or promotion, until dismissed.
     pub write_error: Option<String>,
+    /// The canvas area as last drawn: its size places new cards in view, and
+    /// sidebar drops map from the screen through it.
+    canvas_area: egui::Rect,
     worker_error: Option<String>,
     // A save completed while the current fetch might still contain an older
     // layout list. Discard that list and fetch again after the batch completes.
@@ -372,7 +388,7 @@ impl App {
                         &save_paths,
                         save_auto_start.as_deref(),
                         &job.name,
-                        &job.tree,
+                        &job.layout,
                     ));
                     if save_done.send(SaveDone { job, result }).is_err() {
                         break;
@@ -483,6 +499,7 @@ impl App {
             delete_prompt: None,
             remembered: None,
             write_error: None,
+            canvas_area: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0)),
             worker_error: None,
             discard_layout_list: false,
             pending_saves: 0,
@@ -599,7 +616,7 @@ impl App {
             self.close_error = done.result.as_ref().err().cloned();
         }
         let SaveJob { name, purpose, .. } = done.job;
-        let stored = done.result.map(|layout| layout.tree);
+        let stored = done.result.map(|named| named.layout);
         match purpose {
             SavePurpose::Auto => self.layouts.save_finished(&name, stored, now),
             SavePurpose::SaveAs { from } => self.finish_prompt(Some(&from), &name, stored),
@@ -687,11 +704,11 @@ impl App {
         &mut self,
         from: Option<&LayoutKey>,
         name: &str,
-        stored: Result<Panel, String>,
+        stored: Result<Layout, String>,
     ) {
         match stored {
-            Ok(tree) => {
-                self.layouts.adopt(from, name, &tree);
+            Ok(layout) => {
+                self.layouts.adopt(from, name, &layout);
                 self.prompt = None;
             }
             Err(error) => {
@@ -752,14 +769,14 @@ impl App {
         let job = match prompt.kind {
             PromptKind::SaveAs => SaveJob {
                 name,
-                tree: self.layouts.active().panel(),
+                layout: self.layouts.active().to_layout(),
                 purpose: SavePurpose::SaveAs {
                     from: self.layouts.active_key().clone(),
                 },
             },
             PromptKind::New => SaveJob {
                 name,
-                tree: Panel::Empty {},
+                layout: Layout::default(),
                 purpose: SavePurpose::New,
             },
             PromptKind::Rename => unreachable!("handled above"),
@@ -791,20 +808,38 @@ impl App {
     }
 
     pub fn apply(&mut self, action: Action) {
-        let workspace = self.layouts.active_mut();
+        let viewport = self.canvas_area.size();
+        let canvas = self.layouts.active_mut();
         match action {
-            Action::Show(target) => {
-                workspace.show(target);
+            Action::Show(target) => canvas.place(target, None, viewport),
+            Action::PlaceAt(target, at) => {
+                if canvas.find(&target).is_some() {
+                    let from = canvas.card(&target).expect("found").rect.min;
+                    canvas.move_by(&target, at - from);
+                    canvas.reveal(&target, viewport);
+                } else {
+                    canvas.place(target, Some(at), viewport);
+                }
             }
-            Action::Place(target, placement) => {
-                workspace.open(target, placement);
-            }
-            Action::Retarget { tree, tile, target } if tree == workspace.tree.id() => {
-                workspace.retarget(tile, target);
-                workspace.focused = Some(tile);
-            }
-            Action::Close { tree, tile } if tree == workspace.tree.id() => workspace.close(tile),
-            Action::Retarget { .. } | Action::Close { .. } => (),
+            Action::Card {
+                canvas: id,
+                target,
+                op,
+            } if id == canvas.id => match op {
+                CardOp::Raise => {
+                    canvas.raise(&target);
+                }
+                CardOp::Move(delta) => canvas.move_by(&target, delta),
+                CardOp::Resize(size) => canvas.resize(&target, size),
+                CardOp::ToggleCollapsed => canvas.toggle_collapsed(&target),
+                CardOp::Close => canvas.close(&target),
+                CardOp::Retarget(to) => {
+                    canvas.retarget(&target, to);
+                }
+            },
+            Action::Pan { canvas: id, delta } if id == canvas.id => canvas.pan_by(delta),
+            Action::Card { .. } | Action::Pan { .. } => (),
+            Action::ShowAll => canvas.show_all(),
             Action::Switch(key) => self.layouts.switch(key),
             Action::Revert => self.layouts.revert(),
             Action::Refresh => self.scheduler.refresh_all(),
@@ -844,7 +879,6 @@ impl App {
     /// targets placed in the active layout.
     pub fn tick(&mut self, now: Instant) -> BTreeSet<Target> {
         self.receive(now);
-        self.layouts.active_mut().fix_focus();
         let open = self.layouts.active().targets();
         self.cache.contents.retain(|t, _| open.contains(t));
         for target in &open {
@@ -874,10 +908,10 @@ impl App {
         } else {
             self.layouts.due_saves(now)
         };
-        for (name, tree) in saves {
+        for (name, layout) in saves {
             let job = SaveJob {
                 name: name.clone(),
-                tree,
+                layout,
                 purpose: SavePurpose::Auto,
             };
             if self.channels.saves.try_send(job).is_err() {
@@ -917,7 +951,7 @@ impl App {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
-        // Computed once per frame: both walk every working tree.
+        // Computed once per frame: both convert every working canvas.
         let placed = self.tick(now);
         let entries = self.layouts.entries();
         let wait = self
@@ -959,7 +993,9 @@ impl App {
         egui::Panel::left("resources")
             .default_size(240.0)
             .show(ui, |ui| self.sidebar(ui, &entries, &placed, &mut actions));
-        egui::CentralPanel::default().show(ui, |ui| self.panels(ui, &mut actions));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(ui.visuals().extreme_bg_color))
+            .show(ui, |ui| self.canvas(ui, &mut actions));
         if self.closing {
             self.close_window(ui);
         } else {
@@ -1055,6 +1091,17 @@ impl App {
                 {
                     actions.push(Action::ConfirmDelete);
                 }
+            }
+            ui.separator();
+            if ui
+                .add_enabled(
+                    !self.layouts.active().cards.is_empty(),
+                    egui::Button::new("Show all").small(),
+                )
+                .on_hover_text("Pan to the cards, including any panned out of sight")
+                .clicked()
+            {
+                actions.push(Action::ShowAll);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -1194,11 +1241,11 @@ impl App {
         placed: &BTreeSet<Target>,
         actions: &mut Vec<Action>,
     ) {
-        let workspace = self.layouts.active();
-        let focused = workspace.focused_target().cloned();
-        let has_focus = focused.is_some();
+        let canvas = self.layouts.active();
+        let front = canvas.focused_target().cloned();
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.menu_button("Add panel…", |ui| {
+            ui.menu_button("Add card…", |ui| {
+                // Prefixed: a feed and a board may share a title.
                 let choices =
                     self.cache
                         .feeds
@@ -1215,12 +1262,14 @@ impl App {
                             }),
                         )
                         .chain([(Target::Archive, "Deleted-board archive".to_owned())]);
-                for (target, title) in choices {
-                    ui.push_id(&target, |ui| {
-                        ui.menu_button(title, |ui| {
-                            placement_menu(ui, &target, has_focus, actions);
-                        });
-                    });
+                for (target, mut title) in choices {
+                    if placed.contains(&target) {
+                        title.push_str(" (on canvas)");
+                    }
+                    if ui.button(title).clicked() {
+                        actions.push(Action::Show(target));
+                        ui.close();
+                    }
                 }
             });
             ui.separator();
@@ -1245,7 +1294,7 @@ impl App {
             }
             for feed in self.cache.feeds.iter().map(|f| &f.info) {
                 let target = Target::Feed(feed.name.clone());
-                self.entry(ui, &target, placed, &focused, has_focus, actions, |ui| {
+                self.entry(ui, &target, placed, &front, actions, |ui| {
                     ui.label(format!("Feed name: {}", feed.name));
                     ui.label(format!(
                         "Last submitted {} ago",
@@ -1266,60 +1315,75 @@ impl App {
             }
             for board in self.cache.boards.iter().map(|b| &b.info) {
                 let target = Target::Board(board.id);
-                self.entry(ui, &target, placed, &focused, has_focus, actions, |ui| {
+                self.entry(ui, &target, placed, &front, actions, |ui| {
                     ui.label(format!("Board ID {}", board.id));
                 });
             }
             ui.separator();
-            self.entry(
-                ui,
-                &Target::Archive,
-                placed,
-                &focused,
-                has_focus,
-                actions,
-                |ui| {
-                    ui.label("Items archived from deleted boards. Not saved in layouts.");
-                },
-            );
+            self.entry(ui, &Target::Archive, placed, &front, actions, |ui| {
+                ui.label("Items archived from deleted boards. Not saved in layouts.");
+            });
             ui.separator();
-            ui.weak(
-                "Click to show. Use Add panel… for a new tab or split, or right-click an entry.",
-            );
+            ui.weak("Click to show a card. Drag an entry onto the canvas to place it there.");
         });
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn entry(
         &self,
         ui: &mut egui::Ui,
         target: &Target,
         placed: &BTreeSet<Target>,
-        focused: &Option<Target>,
-        has_focus: bool,
+        front: &Option<Target>,
         actions: &mut Vec<Action>,
         details: impl FnOnce(&mut egui::Ui),
     ) {
         ui.horizontal(|ui| {
             let title = self.cache.title(target);
             let text = if placed.contains(target) {
-                egui::RichText::new(title).strong()
+                egui::RichText::new(&title).strong()
             } else {
-                egui::RichText::new(title)
+                egui::RichText::new(&title)
             };
             let response = ui
-                .selectable_label(focused.as_ref() == Some(target), text)
+                .selectable_label(front.as_ref() == Some(target), text)
+                .interact(egui::Sense::click_and_drag())
                 .on_hover_ui(|ui| {
                     details(ui);
                     if placed.contains(target) {
-                        ui.weak("Placed in this layout");
+                        ui.weak("On the canvas");
                     }
                 });
             if response.clicked() {
                 actions.push(Action::Show(target.clone()));
             }
+            if response.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                    drag_ghost(ui.ctx(), pos, &title);
+                }
+            }
+            if response.drag_stopped()
+                && let Some(pos) = ui.ctx().pointer_interact_pos()
+                && self.canvas_area.contains(pos)
+            {
+                // The pointer lands on the new card's title bar.
+                let at = self.layouts.active().view + (pos - self.canvas_area.min)
+                    - egui::vec2(DROP_GRAB.x, DROP_GRAB.y);
+                actions.push(Action::PlaceAt(target.clone(), at.round()));
+            }
             response.context_menu(|ui| {
-                placement_menu(ui, target, has_focus, actions);
+                if ui.button("Show card").clicked() {
+                    actions.push(Action::Show(target.clone()));
+                    ui.close();
+                }
+                if placed.contains(target) && ui.button("Remove card").clicked() {
+                    actions.push(Action::Card {
+                        canvas: self.layouts.active().id,
+                        target: target.clone(),
+                        op: CardOp::Close,
+                    });
+                    ui.close();
+                }
             });
             if let Some(counts) = self.cache.counts(target) {
                 ui.weak(counts.shown.to_string());
@@ -1360,28 +1424,390 @@ impl App {
         });
     }
 
-    fn panels(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
-        let workspace = self.layouts.active_mut();
-        if workspace.tree.is_empty() {
-            ui.heading("No panels in this layout");
-            ui.label("Click a feed or board in the sidebar to show it here. Use Add panel… to open a new tab or split.");
+    /// The canvas area as last drawn, in screen coordinates.
+    pub fn canvas_area(&self) -> egui::Rect {
+        self.canvas_area
+    }
+
+    /// Where a card is drawn, in screen coordinates (unclipped).
+    pub fn card_screen_rect(&self, target: &Target) -> Option<egui::Rect> {
+        let canvas = self.layouts.active();
+        let card = canvas.card(target)?;
+        Some(
+            card.shown()
+                .translate(self.canvas_area.min.to_vec2() - canvas.view.to_vec2()),
+        )
+    }
+
+    /// The canvas: cards drawn back to front, clipped to the central area.
+    /// Nothing changes while drawing; every change is an action.
+    fn canvas(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        let area = ui.max_rect();
+        self.canvas_area = area;
+        let canvas = self.layouts.active();
+        let offset = area.min.to_vec2() - canvas.view.to_vec2();
+        let screen = |card: &CardState| card.shown().translate(offset);
+        let topmost_at = |pos: egui::Pos2| {
+            area.contains(pos)
+                .then(|| canvas.cards.iter().rposition(|c| screen(c).contains(pos)))
+                .flatten()
+        };
+        let card_action = |target: &Target, op| Action::Card {
+            canvas: canvas.id,
+            target: target.clone(),
+            op,
+        };
+
+        // A press anywhere on a card raises it, including on its buttons.
+        // Read presses from the events: a quick click can press and release
+        // within one frame, and then `press_origin()` is already cleared.
+        let presses: Vec<egui::Pos2> = ui.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        ..
+                    } => Some(*pos),
+                    _ => None,
+                })
+                .collect()
+        });
+        for pos in presses {
+            if let Some(i) = topmost_at(pos)
+                && i + 1 < canvas.cards.len()
+            {
+                actions.push(card_action(&canvas.cards[i].target, CardOp::Raise));
+            }
+        }
+
+        // Registered first, so every card widget sits above it.
+        let background = ui.interact(
+            area,
+            ui.id().with(("canvas", canvas.id)),
+            egui::Sense::click_and_drag(),
+        );
+        if background.dragged() && background.drag_delta() != egui::Vec2::ZERO {
+            actions.push(Action::Pan {
+                canvas: canvas.id,
+                delta: -background.drag_delta(),
+            });
+        }
+        if canvas.cards.is_empty() {
+            ui.put(
+                egui::Rect::from_center_size(area.center(), egui::vec2(560.0, 60.0)),
+                egui::Label::new(
+                    egui::RichText::new(
+                        "No cards in this layout. Click a feed or board in the sidebar, or drag one here.",
+                    )
+                    .weak(),
+                )
+                .selectable(false),
+            );
+        }
+
+        let under = ui.input(|i| i.pointer.hover_pos()).and_then(topmost_at);
+        let front = canvas.cards.len().saturating_sub(1);
+        for (i, card) in canvas.cards.iter().enumerate() {
+            let rect = screen(card);
+            if rect.intersects(area) {
+                self.card(ui, area, card, rect, i == front, under == Some(i), actions);
+            }
+        }
+
+        // The wheel over empty canvas pans; over a card, its list used it.
+        if under.is_none()
+            && ui
+                .input(|i| i.pointer.hover_pos())
+                .is_some_and(|p| area.contains(p))
+        {
+            let delta = ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta));
+            if delta != egui::Vec2::ZERO {
+                actions.push(Action::Pan {
+                    canvas: canvas.id,
+                    delta: -delta,
+                });
+            }
+        }
+    }
+
+    /// One card. Registration order is stacking order within the card: a
+    /// full-card blocker (so lower cards never react through it), the title
+    /// bar, its buttons, the body, and last the resize grips.
+    #[allow(clippy::too_many_arguments)]
+    fn card(
+        &self,
+        ui: &mut egui::Ui,
+        area: egui::Rect,
+        card: &CardState,
+        rect: egui::Rect,
+        front: bool,
+        scroll: bool,
+        actions: &mut Vec<Action>,
+    ) {
+        let canvas = self.layouts.active();
+        let target = &card.target;
+        let act = |op| Action::Card {
+            canvas: canvas.id,
+            target: target.clone(),
+            op,
+        };
+        // Keyed by canvas and target: a rebuilt or retargeted card starts fresh.
+        let salt = canvas.id.with(target);
+        let clip = rect.intersect(area);
+        // An explicit id, not a salt: egui mixes a salted child's position in
+        // the parent into its widget ids, so raising a card (drawing it later)
+        // would change its buttons' ids between press and release.
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id(salt));
+        child.set_clip_rect(clip);
+        child.interact(rect, salt.with("blocker"), egui::Sense::click_and_drag());
+
+        let visuals = child.visuals().clone();
+        let stroke = if front {
+            visuals.selection.stroke
+        } else {
+            visuals.window_stroke
+        };
+        child.painter().rect(
+            rect,
+            6.0,
+            visuals.window_fill,
+            stroke,
+            egui::StrokeKind::Inside,
+        );
+        let title_rect =
+            egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), TITLE_HEIGHT));
+        child.painter().rect_filled(
+            title_rect.shrink(1.0),
+            egui::CornerRadius {
+                nw: 5,
+                ne: 5,
+                sw: if card.collapsed { 5 } else { 0 },
+                se: if card.collapsed { 5 } else { 0 },
+            },
+            visuals.faint_bg_color,
+        );
+        let title = child.interact(
+            title_rect,
+            salt.with("title"),
+            egui::Sense::click_and_drag(),
+        );
+        if title.dragged() && title.drag_delta() != egui::Vec2::ZERO {
+            actions.push(act(CardOp::Move(title.drag_delta())));
+        }
+        if title.double_clicked() {
+            actions.push(act(CardOp::ToggleCollapsed));
+        }
+        let mut bar = child.new_child(
+            egui::UiBuilder::new()
+                .max_rect(title_rect.shrink2(egui::vec2(8.0, 3.0)))
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        bar.set_clip_rect(title_rect.intersect(area));
+        if bar
+            .small_button("×")
+            .on_hover_text("Remove this card from the layout")
+            .clicked()
+        {
+            actions.push(act(CardOp::Close));
+        }
+        let (fold, hint) = if card.collapsed {
+            ("+", "Expand")
+        } else {
+            ("−", "Collapse to the title bar")
+        };
+        if bar.small_button(fold).on_hover_text(hint).clicked() {
+            actions.push(act(CardOp::ToggleCollapsed));
+        }
+        self.retarget_menu(&mut bar, canvas, target, actions);
+        bar.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            let title = self.cache.card_title(target);
+            ui.add(
+                egui::Label::new(egui::RichText::new(title).strong())
+                    .truncate()
+                    .selectable(false),
+            );
+        });
+
+        if card.collapsed {
             return;
         }
-        let tree_id = workspace.tree.id();
-        let mut behavior = Panes {
-            cache: &self.cache,
-            focused: workspace.focused,
-            clicked: None,
-            actions,
-            tree_id,
-        };
-        workspace.tree.ui(&mut behavior, ui);
-        if let Some(tile) = behavior.clicked {
-            workspace.focused = Some(tile);
+        let body = egui::Rect::from_min_max(
+            egui::pos2(rect.min.x + 8.0, rect.min.y + TITLE_HEIGHT + 6.0),
+            rect.max - egui::vec2(8.0, 8.0),
+        );
+        let mut body_ui = child.new_child(egui::UiBuilder::new().max_rect(body));
+        body_ui.set_clip_rect(body.intersect(area));
+        self.card_body(&mut body_ui, target, salt, scroll, actions);
+
+        // Resize from the right edge, the bottom edge, and the corner.
+        const GRIP: f32 = 6.0;
+        let grips = [
+            (
+                "right",
+                egui::Rect::from_min_max(
+                    egui::pos2(rect.max.x - GRIP, rect.min.y + TITLE_HEIGHT),
+                    rect.max,
+                ),
+                egui::vec2(1.0, 0.0),
+                egui::CursorIcon::ResizeHorizontal,
+            ),
+            (
+                "bottom",
+                egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.max.y - GRIP), rect.max),
+                egui::vec2(0.0, 1.0),
+                egui::CursorIcon::ResizeVertical,
+            ),
+            (
+                "corner",
+                egui::Rect::from_min_max(rect.max - egui::Vec2::splat(GRIP * 2.5), rect.max),
+                egui::vec2(1.0, 1.0),
+                egui::CursorIcon::ResizeNwSe,
+            ),
+        ];
+        for (name, grip_rect, axes, cursor) in grips {
+            let grip = child
+                .interact(grip_rect, salt.with(name), egui::Sense::drag())
+                .on_hover_cursor(cursor);
+            if grip.dragged() && grip.drag_delta() != egui::Vec2::ZERO {
+                actions.push(act(CardOp::Resize(
+                    card.rect.size() + grip.drag_delta() * axes,
+                )));
+            }
         }
-        workspace.fix_focus();
+        // A visible corner mark: three short diagonal strokes.
+        let mark = egui::Stroke::new(1.0, visuals.weak_text_color());
+        for step in [4.0, 8.0, 12.0] {
+            child.painter().line_segment(
+                [
+                    rect.max - egui::vec2(step, 3.0),
+                    rect.max - egui::vec2(3.0, step),
+                ],
+                mark,
+            );
+        }
+    }
+
+    /// **Show…**: point the card at another feed or board. Targets already
+    /// on the canvas are disabled (one card per feed or board).
+    fn retarget_menu(
+        &self,
+        ui: &mut egui::Ui,
+        canvas: &workspace::Canvas,
+        current: &Target,
+        actions: &mut Vec<Action>,
+    ) {
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt(canvas.id.with(("retarget", current)))
+            .selected_text("Show…")
+            .width(64.0)
+            .show_ui(ui, |ui| {
+                // Prefixed: a feed and a board may share a title.
+                let choices =
+                    self.cache
+                        .feeds
+                        .iter()
+                        .map(|f| {
+                            (
+                                Target::Feed(f.info.name.clone()),
+                                format!("Feed: {}", f.info.title),
+                            )
+                        })
+                        .chain(
+                            self.cache.boards.iter().map(|b| {
+                                (Target::Board(b.info.id), format!("Board: {}", b.info.name))
+                            }),
+                        )
+                        .chain([(Target::Archive, "Deleted-board archive".to_string())]);
+                for (target, title) in choices {
+                    let placed = canvas.find(&target).is_some();
+                    let response = ui.add_enabled(
+                        !placed || &target == current,
+                        egui::Button::selectable(&target == current, title),
+                    );
+                    if response.clicked() {
+                        chosen = Some(target);
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Point this card at another feed or board");
+        if let Some(target) = chosen.filter(|t| t != current) {
+            actions.push(Action::Card {
+                canvas: canvas.id,
+                target: current.clone(),
+                op: CardOp::Retarget(target),
+            });
+        }
+    }
+
+    fn card_body(
+        &self,
+        ui: &mut egui::Ui,
+        target: &Target,
+        salt: egui::Id,
+        scroll: bool,
+        actions: &mut Vec<Action>,
+    ) {
+        let entry = self.cache.contents.get(target);
+        let contents = entry.and_then(|e| e.contents.as_ref());
+        if let Some(error) = entry.and_then(|e| e.error.as_ref()) {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                if contents.is_some() {
+                    "Unable to refresh; showing the last loaded contents"
+                } else {
+                    "Unable to load"
+                },
+            );
+            ui.label(error);
+            ui.separator();
+        }
+        match contents {
+            None if entry.is_some_and(|e| e.error.is_some()) => (),
+            None => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Loading…");
+                });
+            }
+            Some(Contents::Missing) => placeholder(ui, target),
+            Some(Contents::Feed(feed)) => {
+                show_feed(ui, feed, salt, scroll, &self.cache.boards, actions)
+            }
+            Some(Contents::Board(board)) => show_board(ui, board, salt, scroll),
+        }
     }
 }
+
+/// Follows the pointer while a sidebar entry is dragged toward the canvas.
+fn drag_ghost(ctx: &egui::Context, pos: egui::Pos2, title: &str) {
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::new("card_drag_ghost"),
+    ));
+    let visuals = ctx.global_style().visuals.clone();
+    let rect = egui::Rect::from_min_size(pos - DROP_GRAB, egui::vec2(200.0, TITLE_HEIGHT));
+    painter.rect(
+        rect,
+        5.0,
+        visuals.window_fill.gamma_multiply(0.9),
+        visuals.selection.stroke,
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        rect.left_center() + egui::vec2(8.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        title,
+        egui::FontId::proportional(13.0),
+        visuals.strong_text_color(),
+    );
+}
+
+/// Where the pointer holds a dropped card: on its title bar, near the left.
+const DROP_GRAB: egui::Vec2 = egui::vec2(40.0, 14.0);
 
 /// The other ends of an app's worker channels, for tests that play the
 /// service's part.
@@ -1442,177 +1868,6 @@ impl eframe::App for App {
     }
 }
 
-struct Panes<'a> {
-    cache: &'a Cache,
-    focused: Option<TileId>,
-    clicked: Option<TileId>,
-    actions: &'a mut Vec<Action>,
-    tree_id: egui::Id,
-}
-
-impl Behavior<Pane> for Panes<'_> {
-    fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
-        self.cache.tab_title(&pane.target).into()
-    }
-
-    fn pane_ui(&mut self, ui: &mut egui::Ui, tile: TileId, pane: &mut Pane) -> UiResponse {
-        if ui.ui_contains_pointer() && ui.input(|i| i.pointer.primary_pressed()) {
-            self.clicked = Some(tile);
-        }
-        egui::Frame::new().inner_margin(6.0).show(ui, |ui| {
-            // Keyed by target too: a retargeted panel starts with fresh state.
-            let salt = tile.egui_id(self.tree_id).with(&pane.target);
-            let entry = self.cache.contents.get(&pane.target);
-            let contents = entry.and_then(|e| e.contents.as_ref());
-            if let Some(error) = entry.and_then(|e| e.error.as_ref()) {
-                ui.colored_label(
-                    ui.visuals().error_fg_color,
-                    if contents.is_some() {
-                        "Unable to refresh; showing the last loaded contents"
-                    } else {
-                        "Unable to load"
-                    },
-                );
-                ui.label(error);
-                ui.separator();
-            }
-            match contents {
-                None if entry.is_some_and(|e| e.error.is_some()) => (),
-                None => {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Loading…");
-                    });
-                }
-                Some(Contents::Missing) => placeholder(ui, &pane.target),
-                Some(Contents::Feed(feed)) => {
-                    show_feed(ui, feed, salt, &self.cache.boards, self.actions)
-                }
-                Some(Contents::Board(board)) => show_board(ui, board, salt),
-            }
-        });
-        UiResponse::None
-    }
-
-    fn is_tab_closable(&self, tiles: &Tiles<Pane>, tile: TileId) -> bool {
-        tiles.get(tile).is_some_and(|t| t.is_pane())
-    }
-
-    fn on_tab_close(&mut self, _tiles: &mut Tiles<Pane>, tile: TileId) -> bool {
-        // Close through the workspace so focus and containers stay consistent.
-        self.actions.push(Action::Close {
-            tree: self.tree_id,
-            tile,
-        });
-        false
-    }
-
-    fn on_tab_button(
-        &mut self,
-        tiles: &mut Tiles<Pane>,
-        tile: TileId,
-        response: egui::Response,
-    ) -> egui::Response {
-        if response.clicked() && tiles.get(tile).is_some_and(|t| t.is_pane()) {
-            self.clicked = Some(tile);
-        }
-        response
-    }
-
-    fn paint_on_top_of_tile(
-        &self,
-        painter: &egui::Painter,
-        style: &egui::Style,
-        tile: TileId,
-        rect: egui::Rect,
-    ) {
-        if self.focused == Some(tile) {
-            painter.rect_stroke(
-                rect,
-                0.0,
-                style.visuals.selection.stroke,
-                egui::StrokeKind::Inside,
-            );
-        }
-    }
-
-    fn top_bar_right_ui(
-        &mut self,
-        tiles: &Tiles<Pane>,
-        ui: &mut egui::Ui,
-        _tile: TileId,
-        tabs: &egui_tiles::Tabs,
-        _scroll_offset: &mut f32,
-    ) {
-        let Some(active) = tabs.active else { return };
-        if let Some(egui_tiles::Tile::Pane(pane)) = tiles.get(active) {
-            let target = pane.target.clone();
-            self.retarget_menu(ui, active, &target);
-        }
-    }
-
-    fn simplification_options(&self) -> egui_tiles::SimplificationOptions {
-        workspace::simplification()
-    }
-}
-
-impl Panes<'_> {
-    /// The retarget menu for a tab group's active panel, in its tab bar.
-    fn retarget_menu(&mut self, ui: &mut egui::Ui, tile: TileId, current: &Target) {
-        let mut chosen = None;
-        egui::ComboBox::from_id_salt(("retarget", self.tree_id, tile))
-            .selected_text("Show…")
-            .show_ui(ui, |ui| {
-                // Prefixed: a feed and a board may share a title.
-                let choices =
-                    self.cache
-                        .feeds
-                        .iter()
-                        .map(|f| {
-                            (
-                                Target::Feed(f.info.name.clone()),
-                                format!("Feed: {}", f.info.title),
-                            )
-                        })
-                        .chain(
-                            self.cache.boards.iter().map(|b| {
-                                (Target::Board(b.info.id), format!("Board: {}", b.info.name))
-                            }),
-                        )
-                        .chain([(Target::Archive, "Deleted-board archive".to_string())]);
-                for (target, title) in choices {
-                    if ui.selectable_label(&target == current, title).clicked() {
-                        chosen = Some(target);
-                    }
-                }
-            })
-            .response
-            .on_hover_text("Point this panel at another feed or board");
-        if let Some(target) = chosen.filter(|t| t != current) {
-            self.actions.push(Action::Retarget {
-                tree: self.tree_id,
-                tile,
-                target,
-            });
-        }
-    }
-}
-
-/// Shared by the visible Add panel menu and resource context menus.
-fn placement_menu(ui: &mut egui::Ui, target: &Target, has_focus: bool, actions: &mut Vec<Action>) {
-    for (label, placement, enabled) in [
-        ("Open in new tab", Placement::Tab, true),
-        ("Split right", Placement::Right, true),
-        ("Split below", Placement::Below, true),
-        ("Show in focused panel", Placement::Replace, has_focus),
-    ] {
-        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-            actions.push(Action::Place(target.clone(), placement));
-            ui.close();
-        }
-    }
-}
-
 /// Save state of the active layout, for the layout bar.
 fn layout_status(ui: &mut egui::Ui, entry: &LayoutEntry, actions: &mut Vec<Action>) {
     if entry.key == LayoutKey::Unsaved {
@@ -1649,7 +1904,7 @@ fn placeholder(ui: &mut egui::Ui, target: &Target) {
         Target::Archive => "The archive is unavailable".into(),
     });
     ui.label(
-        "This panel keeps its place in the layout. Use Show… in the tab bar to point it at another feed or board, or close its tab.",
+        "This card keeps its place in the layout. Use Show… in its title bar to point it at another feed or board, or close it.",
     );
     if let Target::Feed(_) = target {
         ui.weak("A new submission under the same name will appear here.");
@@ -1800,10 +2055,17 @@ fn item_actions(
     });
 }
 
+/// Only the topmost card under the pointer scrolls with the wheel: with a
+/// multiplier of 0 a covered card neither scrolls nor consumes the wheel.
+fn wheel(scroll: bool) -> egui::Vec2 {
+    egui::Vec2::splat(if scroll { 1.0 } else { 0.0 })
+}
+
 fn show_feed(
     ui: &mut egui::Ui,
     feed: &Feed,
     salt: egui::Id,
+    scroll: bool,
     boards: &[BoardSummary],
     actions: &mut Vec<Action>,
 ) {
@@ -1833,6 +2095,7 @@ fn show_feed(
     egui::ScrollArea::vertical()
         .id_salt(salt.with("feed_items"))
         .auto_shrink([false, false])
+        .wheel_scroll_multiplier(wheel(scroll))
         .show(ui, |ui| {
             if feed.items.is_empty() {
                 ui.label("This feed is empty.");
@@ -1863,7 +2126,7 @@ fn show_feed(
         });
 }
 
-fn show_board(ui: &mut egui::Ui, board: &BoardContents, salt: egui::Id) {
+fn show_board(ui: &mut egui::Ui, board: &BoardContents, salt: egui::Id, scroll: bool) {
     let open = board.todos.iter().filter(|t| !t.item.done).count();
     ui.label(format!(
         "{} ({open} open) · {}",
@@ -1873,6 +2136,7 @@ fn show_board(ui: &mut egui::Ui, board: &BoardContents, salt: egui::Id) {
     egui::ScrollArea::vertical()
         .id_salt(salt.with("board_items"))
         .auto_shrink([false, false])
+        .wheel_scroll_multiplier(wheel(scroll))
         .show(ui, |ui| {
             ui.strong("Todos");
             if board.todos.is_empty() {
@@ -1961,6 +2225,15 @@ mod tests {
         ListData::Layouts(layouts, Default::default())
     }
     use callboard_core::{feed::Item, layout::NamedLayout, store::BoardInfo};
+
+    /// A saved layout with one card per target, placed as the sidebar would.
+    fn canvas(targets: &[Target]) -> Layout {
+        let mut canvas = workspace::Canvas::new(egui::Id::NULL);
+        for target in targets {
+            canvas.place(target.clone(), None, egui::vec2(1000.0, 700.0));
+        }
+        canvas.to_layout()
+    }
     use serde_json::json;
 
     struct Harness {
@@ -2033,21 +2306,21 @@ mod tests {
             let now = Instant::now();
             let old = NamedLayout {
                 name: "Day".into(),
-                tree: Panel::Feed { name: "a".into() },
+                layout: canvas(&[Target::Feed("a".into())]),
                 updated_at_ms: 1,
             };
             app.layouts.sync_saved(std::slice::from_ref(&old));
-            app.apply(Action::Place(Target::Board(2), Placement::Right));
+            app.apply(Action::Show(Target::Board(2)));
             app.tick(now);
             ends.requests.try_recv().unwrap(); // Leave the old fetch in flight.
             app.tick(now + workspace::SAVE_DELAY);
             let job = ends.saves.try_recv().unwrap();
-            let tree = job.tree.clone();
+            let saved = job.layout.clone();
             ends.saved
                 .send(SaveDone {
                     result: Ok(NamedLayout {
                         name: job.name.clone(),
-                        tree: tree.clone(),
+                        layout: saved.clone(),
                         updated_at_ms: 2,
                     }),
                     job,
@@ -2063,7 +2336,7 @@ mod tests {
                 })
                 .unwrap();
             app.tick(now + workspace::SAVE_DELAY);
-            assert_eq!(app.layouts.active().panel(), tree);
+            assert_eq!(app.layouts.active().to_layout(), saved);
             let next = ends
                 .requests
                 .try_recv()
@@ -2076,7 +2349,7 @@ mod tests {
                         backend::List::Layouts,
                         Ok(layouts(vec![NamedLayout {
                             name: "Day".into(),
-                            tree: Panel::Board { id: 3 },
+                            layout: canvas(&[Target::Board(3)]),
                             updated_at_ms: 3,
                         }])),
                     )],
@@ -2084,7 +2357,10 @@ mod tests {
                 })
                 .unwrap();
             app.tick(now + workspace::SAVE_DELAY);
-            assert_eq!(app.layouts.active().panel(), Panel::Board { id: 3 });
+            assert_eq!(
+                app.layouts.active().targets(),
+                BTreeSet::from([Target::Board(3)])
+            );
         }
     }
 
@@ -2093,10 +2369,10 @@ mod tests {
         let (mut app, ends) = App::for_tests();
         app.layouts.sync_saved(&[NamedLayout {
             name: "Day".into(),
-            tree: Panel::Feed { name: "a".into() },
+            layout: canvas(&[Target::Feed("a".into())]),
             updated_at_ms: 1,
         }]);
-        app.apply(Action::Place(Target::Board(2), Placement::Right));
+        app.apply(Action::Show(Target::Board(2)));
         // Pending changes in an inactive layout must also be flushed.
         app.apply(Action::Switch(LayoutKey::Unsaved));
         let ctx = egui::Context::default();
@@ -2128,7 +2404,7 @@ mod tests {
             .send(SaveDone {
                 result: Ok(NamedLayout {
                     name: job.name.clone(),
-                    tree: job.tree.clone(),
+                    layout: job.layout.clone(),
                     updated_at_ms: 2,
                 }),
                 job,
@@ -2185,10 +2461,7 @@ mod tests {
                     boards: vec![],
                     layouts: vec![NamedLayout {
                         name: "Day".into(),
-                        tree: serde_json::from_value(json!({"kind":"split","axis":"horizontal",
-                            "weights":[1.0,1.0],"children":[{"kind":"feed","name":"reviews"},
-                            {"kind":"board","id":4}]}))
-                        .unwrap(),
+                        layout: canvas(&[Target::Feed("reviews".into()), Target::Board(4)]),
                         updated_at_ms: 0,
                     }],
                 }),
@@ -2225,8 +2498,8 @@ mod tests {
             })
         );
         assert_eq!(cache.marker(&Target::Board(4)), Some("deleted"));
-        assert_eq!(cache.tab_title(&Target::Board(4)), "Board 4 · deleted");
-        // The deleted board's panel survives in the layout.
+        assert_eq!(cache.card_title(&Target::Board(4)), "Board 4 · deleted");
+        // The deleted board's card survives in the layout.
         assert!(h.app.layouts.active().targets().contains(&Target::Board(4)));
         assert!(h.requests.try_recv().is_err(), "nothing more to fetch");
         // A mid-stream resync (lag) refetches lists and every placed target.
@@ -2239,7 +2512,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_actions_arrange_panels_and_drop_contents_of_closed_ones() {
+    fn sidebar_actions_place_cards_and_drop_contents_of_closed_ones() {
         let mut h = Harness::new();
         h.frame();
         h.request();
@@ -2259,23 +2532,17 @@ mod tests {
         h.frame();
         assert_eq!(h.app.layouts.active_key(), &LayoutKey::Unsaved);
         h.app.apply(Action::Show(Target::Feed("a".into())));
-        h.app
-            .apply(Action::Place(Target::Board(2), Placement::Right));
-        h.app
-            .apply(Action::Place(Target::Feed("b".into()), Placement::Tab));
+        h.app.apply(Action::Show(Target::Board(2)));
+        h.app.apply(Action::Show(Target::Feed("b".into())));
+        // Showing a placed target again reveals it instead of adding a card.
+        h.app.apply(Action::Show(Target::Board(2)));
+        h.app.apply(Action::Show(Target::Feed("b".into())));
         h.frame();
         let request = h.request();
         assert_eq!(request.targets.len(), 3);
-        let panel = h.app.layouts.active().panel();
-        assert_eq!(
-            panel,
-            serde_json::from_value(
-                json!({"kind":"split","axis":"horizontal","weights":[1.0,1.0],
-                "children":[{"kind":"feed","name":"a"},{"kind":"tabs","active":1,"children":[
-                    {"kind":"board","id":2},{"kind":"feed","name":"b"}]}]})
-            )
-            .unwrap()
-        );
+        let canvas = h.app.layouts.active();
+        assert_eq!(canvas.cards.len(), 3);
+        assert_eq!(canvas.focused_target(), Some(&Target::Feed("b".into())));
         h.responses
             .send(Fetched {
                 lists: vec![],
@@ -2324,45 +2591,65 @@ mod tests {
         assert!(h.app.cache.refreshed_at.is_some());
         assert!(
             h.requests.try_recv().is_err(),
-            "failed panel waits for its retry"
+            "failed card waits for its retry"
         );
-        let focused = h.app.layouts.active().focused.unwrap();
-        let tree = h.app.layouts.active().tree.id();
-        h.app.apply(Action::Close {
-            tree,
-            tile: focused,
+        let id = h.app.layouts.active().id;
+        h.app.apply(Action::Card {
+            canvas: id,
+            target: Target::Feed("b".into()),
+            op: CardOp::Close,
         });
         h.frame();
-        assert_eq!(h.app.cache.contents.len(), 2, "closed panel's data dropped");
+        assert_eq!(h.app.cache.contents.len(), 2, "closed card's data dropped");
         assert_eq!(
             h.app.layouts.active().focused_target(),
             Some(&Target::Board(2))
         );
-        // Retargeting fetches the new target for the same panel.
-        let tile = h.app.layouts.active().focused.unwrap();
-        h.app.apply(Action::Retarget {
-            tree,
-            tile,
-            target: Target::Archive,
+        // Retargeting fetches the new target for the same card.
+        let rect = h.app.layouts.active().card(&Target::Board(2)).unwrap().rect;
+        h.app.apply(Action::Card {
+            canvas: id,
+            target: Target::Board(2),
+            op: CardOp::Retarget(Target::Archive),
         });
         h.frame();
         assert_eq!(h.request().targets, vec![Target::Archive]);
+        assert_eq!(
+            h.app.layouts.active().card(&Target::Archive).unwrap().rect,
+            rect
+        );
+        // One card per target: retargeting onto a placed target is refused.
+        h.app.apply(Action::Card {
+            canvas: id,
+            target: Target::Archive,
+            op: CardOp::Retarget(Target::Feed("a".into())),
+        });
+        assert!(h.app.layouts.active().find(&Target::Archive).is_some());
     }
 
     #[test]
-    fn tile_actions_from_a_replaced_tree_are_ignored() {
+    fn card_actions_from_a_replaced_canvas_are_ignored() {
         let mut h = Harness::new();
         h.app.layouts.sync_saved(&[NamedLayout {
             name: "Day".into(),
-            tree: serde_json::from_value(json!({"kind":"feed","name":"a"})).unwrap(),
+            layout: canvas(&[Target::Feed("a".into())]),
             updated_at_ms: 0,
         }]);
-        let tree = h.app.layouts.active().tree.id();
-        let tile = h.app.layouts.active().focused.unwrap();
-        // Same frame: a revert rebuilds the tree, then a queued close arrives.
+        let id = h.app.layouts.active().id;
+        // Same frame: a revert rebuilds the canvas, then queued actions arrive.
         h.app.apply(Action::Revert);
-        h.app.apply(Action::Close { tree, tile });
-        assert_eq!(h.app.layouts.active().targets().len(), 1, "panel kept");
+        h.app.apply(Action::Card {
+            canvas: id,
+            target: Target::Feed("a".into()),
+            op: CardOp::Close,
+        });
+        h.app.apply(Action::Pan {
+            canvas: id,
+            delta: egui::vec2(50.0, 0.0),
+        });
+        let canvas = h.app.layouts.active();
+        assert_eq!(canvas.targets().len(), 1, "card kept");
+        assert_eq!(canvas.view, egui::Pos2::ZERO, "not panned");
     }
 
     #[test]
@@ -2370,11 +2657,10 @@ mod tests {
         let mut h = Harness::new();
         h.app.layouts.sync_saved(&[NamedLayout {
             name: "Day".into(),
-            tree: serde_json::from_value(json!({"kind":"feed","name":"a"})).unwrap(),
+            layout: canvas(&[Target::Feed("a".into())]),
             updated_at_ms: 0,
         }]);
-        h.app
-            .apply(Action::Place(Target::Board(2), Placement::Right));
+        h.app.apply(Action::Show(Target::Board(2)));
         let t0 = Instant::now();
         h.app.tick(t0);
         assert!(
@@ -2385,12 +2671,12 @@ mod tests {
         let job = h.saves.try_recv().expect("an auto-save");
         assert_eq!(job.name, "Day");
         assert_eq!(job.purpose, SavePurpose::Auto);
-        assert!(matches!(job.tree, Panel::Split { .. }));
+        assert_eq!(job.layout.cards.len(), 2);
         h.saved
             .send(SaveDone {
                 result: Ok(NamedLayout {
                     name: job.name.clone(),
-                    tree: job.tree.clone(),
+                    layout: job.layout.clone(),
                     updated_at_ms: 1,
                 }),
                 job,

@@ -1,8 +1,4 @@
-use callboard_core::{
-    feed::parse_submission,
-    layout::{Layout, Panel},
-    store::*,
-};
+use callboard_core::{feed::parse_submission, layout::Layout, store::*};
 use tokio::sync::broadcast::{Receiver, error::TryRecvError};
 
 fn take(rx: &mut Receiver<Change>, expected: Change) {
@@ -91,15 +87,7 @@ async fn all_mutations_notify_after_success_and_failed_writes_stay_silent() {
     store.delete_board(a, true).await.unwrap();
     assert_eq!(rx.try_recv().unwrap(), board(a));
     take(&mut rx, board(1));
-    store
-        .save_layout(
-            "Day",
-            &Layout {
-                tree: Panel::Empty {},
-            },
-        )
-        .await
-        .unwrap();
+    store.save_layout("Day", &Layout::default()).await.unwrap();
     take(&mut rx, Change::Layout { name: "Day".into() });
     store.delete_feed("work").await.unwrap();
     take(&mut rx, feed());
