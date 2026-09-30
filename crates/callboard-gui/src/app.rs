@@ -1,4 +1,4 @@
-//! The desktop window: resource sidebar, layout bar, and panel tree.
+//! The desktop window: resource sidebar, layout bar, and canvas of cards.
 //! Writes manage layouts and snooze or promote feed items; boards and their
 //! items are not yet editable.
 use crate::{
@@ -37,7 +37,7 @@ pub struct Cache {
 }
 
 /// A placed target's last loaded contents and its latest fetch failure. A
-/// failed refetch keeps the old contents so an outage does not blank panels.
+/// failed refetch keeps the old contents so an outage does not blank cards.
 #[derive(Default)]
 pub struct Entry {
     pub contents: Option<Contents>,
@@ -584,7 +584,7 @@ impl App {
             if result.is_err() {
                 outcome.failed.push(target.clone());
             }
-            // Responses for panels closed meanwhile would never be invalidated.
+            // Responses for cards closed meanwhile would never be invalidated.
             if !open.contains(&target) {
                 continue;
             }
@@ -662,7 +662,7 @@ impl App {
             // worth interrupting the user for.
             (WriteOp::Remember { .. }, _) => (),
             // The change notice also triggers these refetches; asking directly
-            // keeps the panel current while the event stream is down.
+            // keeps the card current while the event stream is down.
             (WriteOp::Snooze { feed, .. }, Ok(_)) => self.scheduler.want(Target::Feed(feed)),
             (WriteOp::Promote { board_id, .. }, Ok(_)) => {
                 self.scheduler.want(Target::Board(board_id))
@@ -1403,7 +1403,7 @@ impl App {
         });
     }
 
-    /// One line under the layout bar, so an outage does not shift the panels
+    /// One line under the layout bar, so an outage does not shift the canvas
     /// around; details and setup hints are on hover.
     fn error_bar(&self, ui: &mut egui::Ui, error: &str) {
         let hint = if self.auto_start_disabled {
@@ -1883,7 +1883,7 @@ fn layout_status(ui: &mut egui::Ui, entry: &LayoutEntry, actions: &mut Vec<Actio
         ui.weak("saved");
     }
     if entry.unsaveable {
-        ui.weak("· the archive panel is not saved in layouts");
+        ui.weak("· the archive card is not saved in layouts");
     }
     if entry.outdated && !entry.pending {
         ui.colored_label(ui.visuals().warn_fg_color, "changed in another window");
@@ -2555,7 +2555,7 @@ mod tests {
             .unwrap();
         h.frame();
         assert_eq!(h.app.cache.contents.len(), 3);
-        // A failed refetch keeps what was loaded and retries only that panel.
+        // A failed refetch keeps what was loaded and retries only that card.
         h.signals.send(Signal::Connected).unwrap();
         h.signals.send(Signal::Notice(Notice::Resync)).unwrap();
         h.frame();

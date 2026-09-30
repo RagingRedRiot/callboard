@@ -14,7 +14,7 @@ use std::{
 /// Concurrent target fetches per batch. Each is its own Unix connection.
 const MAX_CONCURRENT: usize = 8;
 
-/// What a panel shows. `Archive` is the deleted-board archive, which is not a
+/// What a card shows. `Archive` is the deleted-board archive, which is not a
 /// layout target (DESIGN.md §6.4) and so is never persisted.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Target {
@@ -26,7 +26,7 @@ pub enum Target {
 pub enum Contents {
     Feed(Feed),
     Board(BoardContents),
-    /// The feed or board no longer exists; its panel stays as a placeholder.
+    /// The feed or board no longer exists; its card stays as a placeholder.
     Missing,
 }
 

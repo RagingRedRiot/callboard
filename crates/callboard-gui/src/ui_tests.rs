@@ -1050,3 +1050,37 @@ fn buttons_on_a_card_behind_others_work_on_the_first_click() {
         "and collapsed"
     );
 }
+
+#[test]
+fn the_right_and_bottom_edges_resize_one_dimension_each() {
+    let mut ui = Ui::new();
+    let card = ui.card(&feed("a"));
+    let right = Pos2::new(card.right() - 2.0, card.center().y);
+    ui.drag(right, right + Vec2::new(50.0, 30.0));
+    let rect = ui.canvas().card(&feed("a")).unwrap().rect;
+    assert_eq!(rect.size(), card.size() + Vec2::new(50.0, 0.0));
+    let card = ui.card(&feed("a"));
+    let bottom = Pos2::new(card.center().x, card.bottom() - 2.0);
+    ui.drag(bottom, bottom + Vec2::new(30.0, -1000.0));
+    let rect = ui.canvas().card(&feed("a")).unwrap().rect;
+    assert_eq!(rect.size(), Vec2::new(card.width(), MIN_CARD.y));
+    assert_eq!(rect.min, ui.canvas().card(&feed("a")).unwrap().rect.min);
+}
+
+#[test]
+fn a_deleted_target_stays_as_a_placeholder_until_retargeted() {
+    let mut ui = Ui::with(Saved {
+        layouts: vec![layout("Day", &[Target::Board(9)])],
+        ..Saved::default()
+    });
+    let before = ui.card(&Target::Board(9));
+    ui.harness.get_by_label("Board 9 · deleted");
+    ui.harness.get_by_label("Board 9 no longer exists");
+    ui.harness.get_by_value("Show…").click();
+    ui.settle();
+    ui.harness.get_by_label("Feed: a title").click();
+    ui.settle();
+    assert_eq!(ui.order(), [feed("a")]);
+    assert_eq!(ui.card(&feed("a")), before, "same place and size");
+    ui.harness.get_by_label("a title (1)");
+}

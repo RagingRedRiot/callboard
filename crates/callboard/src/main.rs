@@ -67,7 +67,7 @@ enum Command {
     },
     /// Read the archive of items from deleted boards.
     Archive,
-    /// List saved layouts as JSON, including their panel trees.
+    /// List saved layouts as JSON, including their cards.
     Layouts,
     Layout {
         #[command(subcommand)]

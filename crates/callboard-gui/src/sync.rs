@@ -206,7 +206,7 @@ impl Scheduler {
         }
     }
 
-    /// Fetch `target` soon, for example when a panel first shows it. Already
+    /// Fetch `target` soon, for example when a card first shows it. Already
     /// in flight: its response is coming, so it is not queued again.
     pub fn want(&mut self, target: Target) {
         if !self

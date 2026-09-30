@@ -715,8 +715,20 @@ everything passed. Stopped at the Phase 3 review point.
   saved as a layout, and restarted the GUI to confirm view, positions, order,
   and collapse state restore. Full local workflow passed.
 
+## Canvas Phases 4–5: remaining tests and desktop checks
+
+- Tests: resizing by the right and bottom edges (one dimension each, down to
+  the minimum), and a deleted board kept as a placeholder card (title
+  "· deleted", explanation in the body) that Show… retargets in place. The
+  GUI suite passed 15 consecutive runs.
+- Desktop, against an isolated seeded service with the uinput pointer:
+  resized a card by both edges (saved), scrolled an 80-item feed inside its
+  card with the wheel (view unchanged), panned away, and Show all brought the
+  cards back. Together with the Phase 3 checks this covers the Phase 5 list.
+- Replaced leftover "panel" wording in comments and the `layouts` help text.
+  Full local workflow passed.
+
 ## Suggested next
 
-Canvas Phases 4–5 remain from docs/canvas-plan.md: broaden interaction tests
-where useful and polish from the user's first real use. Then board editing,
-drag-to-promote (§6.3), and quick open (Ctrl+K).
+Board editing in the GUI (in progress), then drag-to-promote (§6.3) and quick
+open (Ctrl+K).
