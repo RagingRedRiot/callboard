@@ -641,5 +641,8 @@ alone, through a refusal. Full local workflow passed.
 
 ## Suggested next
 
-Board editing in the GUI (complete todos, edit, archive, reorder), then
-sidebar drag-to-place, drag-to-promote (§6.3), and quick open (Ctrl+K).
+Canvas GUI: DESIGN.md §6 now specifies a pannable canvas of overlapping,
+resizable, collapsible cards (one per feed or board) instead of splits and
+tabs. The phased implementation plan is in [docs/canvas-plan.md](docs/canvas-plan.md),
+starting with a rendering prototype. Board editing, drag-to-promote, and quick
+open (Ctrl+K) follow the canvas.

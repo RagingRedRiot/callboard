@@ -1,8 +1,8 @@
 # callboard design
 
 callboard is a Linux per-user bulletin board implemented in Rust. A background
-service stores feeds, todos, and notes; a desktop GUI arranges them into
-draggable panels; scripts submit feeds through the CLI, and a stdio MCP server
+service stores feeds, todos, and notes; a desktop GUI pins them as cards on a
+canvas; scripts submit feeds through the CLI, and a stdio MCP server
 lets AI clients read the board and add todos and notes. This document describes
 the intended design before implementation; the schema, API, and CLI are not yet
 stable interfaces.
@@ -42,7 +42,7 @@ A feed is the section a tool declares by name. Each submission to a feed is a
 complete snapshot of its items. Boards hold the user's todos and notes; feeds
 never contain todos or notes, and boards never contain feed items. A todo or
 note can reference a feed item it was promoted from (§5.3). A layout arranges
-feeds and boards into panels on screen (§6).
+feeds and boards as cards on a canvas (§6).
 
 The service owns all persistent state, including layouts. The GUI is a client
 and holds only window geometry.
@@ -138,7 +138,7 @@ the item is removed.
 
 ### 4.1 Snooze
 
-A snoozed item is hidden from its feed panel, which shows a count of snoozed
+A snoozed item is hidden from its feed card, which shows a count of snoozed
 items. A snooze ends:
 
 - at a chosen instant, or
@@ -177,7 +177,7 @@ to be empty or an explicit confirmation that archives its contents.
 A todo has a title, optional body and URL, a done flag, an optional reference
 (§5.3), and a position in its board. A note has a body, an optional title and
 URL, color, and reference, and a position in its board; the GUI renders notes
-as sticky-note cards beside the board's todo list.
+as sticky notes beside the board's todo list.
 
 Todos and notes never expire. Marking a todo done keeps it visible until it is
 archived. Archiving hides an item into the board's archive, from which it can be
@@ -197,7 +197,7 @@ field and the copied body becomes its note body.
 References resolve at display time:
 
 - **live** — the feed holds an item with that key. The GUI shows its current
-  title and can reveal it in its feed panel.
+  title and can reveal it in its feed card.
 - **source gone** — the item or its feed no longer exists. The GUI shows the
   copied title and URL with a "source gone" marker.
 
@@ -219,45 +219,76 @@ thing has resolved.
 
 ## 6. GUI
 
-### 6.1 Panels
+### 6.1 Canvas and cards
 
-The window is a tree of panels: splits and tab groups whose leaves each show one
-feed or one board. The user drags panels to rearrange, split, or stack them, and
-can point an existing panel at a different feed or board. A sidebar lists every
-feed and board with item counts and error/stale markers; dragging an entry into
-the window places it.
+The window is a canvas — a callboard — with a sidebar beside it. Each feed or
+board placed on the canvas is a **card**: a free-floating, resizable window with
+a title bar. Cards may overlap; clicking anywhere on a card brings it to the
+front. The user arranges cards however suits the work: a wide feed next to a
+narrow board, a stack of small status cards in a corner.
+
+- **Move** by dragging the title bar; **resize** by dragging an edge or corner.
+  Cards have a minimum size that keeps the title bar and a few rows readable.
+- **Collapse** folds a card to its title bar, which keeps showing the target's
+  name, counts, and error/stale marker, so a collapsed card works as a compact
+  status tile. Expanding restores its previous height.
+- **Scroll** within a card: contents never grow a card, so a feed of hundreds of
+  items stays the size the user gave it and scrolls inside.
+- **Close** removes the card from the layout; the feed or board is unaffected.
+- **Show…** in the title bar points the card at a different feed or board.
+
+A layout holds at most one card per feed or board. Targets already on the
+canvas are shown but disabled in **Show…**.
+
+The canvas is unbounded and pans: drag empty canvas, or scroll the wheel or
+trackpad over empty canvas (Shift + wheel pans horizontally). Over a card, the
+wheel scrolls that card's contents. There is no zoom. Resizing the window shows
+more or less of the canvas and never moves cards. **Show all** pans so the
+top-left of the cards' bounding box is in view, recovering cards panned out of
+sight.
+
+A sidebar lists every feed and board with item counts and error/stale markers.
+Clicking an entry reveals its card (panning to it, bringing it to the front, and
+expanding it if collapsed) or, when it has none, places a new card in the middle
+of the view, offset from any card already there. **Add card…** offers the same.
+Dragging an entry onto the canvas places its card at the drop point.
 
 Feeds that are not placed still accept submissions and stay current.
 
-### 6.2 Feed panels
+### 6.2 Feed cards
 
-A feed panel shows the feed's title, source link, last-submitted time, and any
+A feed card shows the feed's title, source link, last-submitted time, and any
 error or stale marker, then its visible items in display order (§4.2). Item
 actions: open link, snooze, drag to reorder, promote to todo or note, reveal
 snoozed.
 
-### 6.3 Board panels
+### 6.3 Board cards
 
-A board panel shows the board's todos and notes. Todos are a checklist; notes
-are cards. Both reorder by dragging and accept drags from feed panels as
+A board card shows the board's todos and notes. Todos are a checklist; notes
+are sticky notes. Both reorder by dragging and accept drags from feed cards as
 promotion (§5.3).
 
 ### 6.4 Layouts
 
-A layout is the panel tree plus each leaf's target. The GUI saves changes to the
-active layout through the API as they happen. The user can keep several named
-layouts — one per project or kind of day — and switch between them. Switching
-layouts never changes feeds or boards.
+A layout is the arrangement of cards on the canvas: each card's target,
+position, size, and collapsed state, the cards' front-to-back order, and the
+canvas view position. The GUI saves changes to the active layout through the
+API as they happen, after a one-second pause, so a drag or resize saves once
+when it ends; panning and bringing a card to the front are saved the same way.
+The user can keep several named layouts — one per project or kind of day — and
+switch between them. Switching layouts never changes feeds or boards.
 
-A layout leaf whose feed or board has been deleted shows an empty placeholder
-until the user retargets or closes it.
+A card whose feed or board has been deleted stays in place as a placeholder
+until the user retargets or closes it. The deleted-board archive can be shown
+as a card but is not stored in layouts.
 
 The layout API is independent of the GUI toolkit. `GET /layouts` returns all
-saved layouts sorted by name, each with `name`, `tree`, and `updated_at_ms`.
-`PUT /layouts/{name}` accepts `{"tree": ...}` and atomically creates or replaces
-that name, returning the saved layout with HTTP 200. Names are case-sensitive,
-1–100 Unicode characters, without surrounding whitespace or control characters;
-encode the name as one URI path segment. An empty list is valid before any save.
+saved layouts sorted by name, each with `name`, `view`, `cards`, and
+`updated_at_ms`. `PUT /layouts/{name}` accepts `{"view": ..., "cards": [...]}`
+and atomically creates or replaces that name, returning the saved layout with
+HTTP 200. Names are case-sensitive, 1–100 Unicode characters, without
+surrounding whitespace or control characters; encode the name as one URI path
+segment. An empty list is valid before any save.
 
 `PATCH /layouts/{name}` with `{"name": "New name"}` renames a layout and returns
 it with a new `updated_at_ms`; a missing layout is 404, and an existing layout
@@ -273,23 +304,34 @@ The preference follows layout renames and clears when its layout is deleted.
 Preference changes emit no notice. The GUI records the active layout whenever
 it changes and opens it at startup, falling back to the first layout by name.
 
-Tree nodes are tagged with `kind`:
+A layout body:
 
-- `{"kind":"empty"}` represents an empty layout (root only).
-- `{"kind":"feed","name":"reviews"}` targets a feed.
-- `{"kind":"board","id":2}` targets a user board (ID greater than 1).
-- `{"kind":"split","axis":"horizontal","children":[...],"weights":[2,1]}`
-  splits two or more children. Axis is horizontal (children left to right) or
-  vertical (top to bottom); each child has a finite positive relative weight,
-  and their sum must be finite.
-- `{"kind":"tabs","children":[...],"active":0}` holds one or more children
-  with a zero-based active index.
+```json
+{
+  "view": {"x": -40, "y": 0},
+  "cards": [
+    {"target": {"kind": "feed", "name": "reviews"},
+     "x": 0, "y": 0, "width": 420, "height": 560, "collapsed": false},
+    {"target": {"kind": "board", "id": 2},
+     "x": 440, "y": 0, "width": 360, "height": 300, "collapsed": true}
+  ]
+}
+```
 
-Unknown fields, invalid targets, and invalid tree shapes are rejected. Targets
-are validated syntactically, not checked for existence. Trees are limited to
-256 nodes and 16 levels (root counts as one); save bodies are limited to 64 KiB.
-Invalid saves preserve the previous layout. Saving layouts does not mutate
-feeds or boards, and target deletion does not modify stored layouts.
+Coordinates are canvas units (the GUI's logical pixels at 100% scale), with y
+increasing downward. `view` is the canvas point shown at the top-left of the
+canvas area. `cards` is ordered back to front: the last card is drawn on top.
+Targets are `{"kind":"feed","name":...}` or `{"kind":"board","id":...}` with a
+user board ID greater than 1. `height` is the expanded height, kept while a card
+is collapsed. An empty layout has no cards.
+
+Unknown fields, invalid targets, and duplicate targets are rejected.
+Coordinates must be finite with magnitude at most 1,000,000; widths and heights
+must be finite, from 1 to 100,000 (the GUI enlarges cards below its minimum
+size when displaying them). A layout holds at most 256 cards, and save bodies
+are limited to 64 KiB. Targets are validated syntactically, not checked for
+existence. Invalid saves preserve the previous layout. Saving layouts does not
+mutate feeds or boards, and target deletion does not modify stored layouts.
 
 ### 6.5 Live updates
 
@@ -306,9 +348,12 @@ gap can go unseen. A resync mid-stream (lag) always refetches.
 
 ### 6.6 Toolkit
 
-egui via eframe, with `egui_tiles` for the draggable panel tree. It provides
-splits, tabs, and drag rearrangement with little custom code, which is the GUI's
-central requirement.
+egui via eframe. Cards are drawn inside the canvas area in the layout's
+back-to-front order and clipped to it, so they never cover the sidebar or the
+layout bar; the GUI maps canvas coordinates to the screen with the view offset.
+egui supplies the pieces — child areas, scroll areas, and drag sensing — and
+the GUI owns card geometry and stacking order, which are exactly what a layout
+stores.
 
 ## 7. Components
 
@@ -530,9 +575,10 @@ API semantics. `--no-auto-start` applies to all these commands.
 BOARD [--kind todo|note]` copies an item into the selected board; the default
 kind is todo. Feed keys are literal strings, encoded exactly once by the CLI.
 
-`layouts` lists saved layouts with their trees. `layout save NAME` reads and
-validates a `{"tree":...}` object from stdin, bounded at 64 KiB, and creates or
-replaces that layout. Layout names are literal Unicode strings and use the
+`layouts` lists saved layouts with their cards. `layout save NAME` reads and
+validates a layout object (§6.4) from stdin, bounded at 64 KiB, and creates or
+replaces that layout. `layout rename NAME NEW_NAME` never replaces another
+layout, and `layout rm NAME` reports whether the layout existed. Layout names are literal Unicode strings and use the
 same name rules as the API. Validations happen before service access; these
 commands retain global `--no-auto-start` and JSON response semantics.
 
@@ -658,8 +704,10 @@ services, XDG base directories, and a Wayland or X11 desktop for the GUI.
   feature; callboard's change summary is already shaped for it.
 - **New and updated markers.** Whether items show "new" or "updated" badges until
   seen, and what counts as seen.
-- **Free-form note placement.** Notes are ordered cards in a board; placing them
-  freely on a canvas is possible later.
+- **Free-form note placement.** Notes are ordered sticky notes inside a board
+  card; placing them freely is possible later.
+- **Canvas zoom and snapping.** Zooming out for an overview, and snapping cards
+  to each other's edges, can be added without changing the layout format.
 - **Due dates.** Whether todos carry due dates, and whether cued reminders are
   created for them. callboard itself stays silent (§1).
 - **Search** across feeds, todos, and notes.
