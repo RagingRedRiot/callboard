@@ -255,6 +255,13 @@ Dragging an entry onto the canvas places its card at the drop point.
 
 Feeds that are not placed still accept submissions and stay current.
 
+**Quick open** (Ctrl+K, or **Open…** in the layout bar) finds a feed, board,
+the deleted-board archive, or a saved layout by name. Typing narrows the list;
+names that start with the text rank first, then word starts, then matches
+anywhere, then the typed letters in order. ↑/↓ move the selection; Enter or a
+click opens it: a feed or board card is revealed or placed as from the
+sidebar, and a layout is switched to. Escape or a click outside closes it.
+
 ### 6.2 Feed cards
 
 A feed card shows the feed's title, source link, last-submitted time, and any

@@ -1645,3 +1645,84 @@ fn a_feed_item_dropped_off_a_board_or_cancelled_promotes_nothing() {
         "no promotion"
     );
 }
+
+// Quick open (DESIGN.md §6.1).
+
+impl Ui {
+    fn quick_open(&mut self) {
+        self.harness
+            .key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::K);
+        self.settle();
+        self.harness.get_by_label("Open a feed, board, or layout");
+    }
+
+    fn quick_open_is_closed(&self) -> bool {
+        self.harness
+            .query_by_label("Open a feed, board, or layout")
+            .is_none()
+    }
+}
+
+#[test]
+fn ctrl_k_finds_a_board_by_name_and_enter_places_its_card() {
+    let mut ui = Ui::new();
+    ui.quick_open();
+    type_keys(&mut ui, "inb");
+    ui.settle();
+    ui.harness.get_by_label("Board: Inbox");
+    assert!(ui.harness.query_by_label("Feed: a title").is_none());
+    ui.harness.key_press(egui::Key::Enter);
+    ui.settle();
+    assert!(ui.quick_open_is_closed());
+    assert_eq!(ui.order(), [feed("a"), Target::Board(2)]);
+}
+
+#[test]
+fn arrows_move_the_selection_and_layouts_switch() {
+    let mut ui = Ui::new();
+    ui.quick_open();
+    // Empty: every choice, in sidebar order. Down twice then up once.
+    ui.harness.get_by_label("Feed: a title (on canvas)");
+    for key in [
+        egui::Key::ArrowDown,
+        egui::Key::ArrowDown,
+        egui::Key::ArrowUp,
+    ] {
+        ui.harness.key_press(key);
+        ui.settle();
+    }
+    // Enter opens the second choice.
+    ui.harness.key_press(egui::Key::Enter);
+    ui.settle();
+    assert_eq!(ui.order(), [feed("a"), feed("b")]);
+    ui.quick_open();
+    type_keys(&mut ui, "ops");
+    ui.settle();
+    ui.harness.get_by_label("Layout: Ops").click();
+    ui.settle();
+    assert_eq!(
+        ui.app().layouts.active_key(),
+        &LayoutKey::Saved("Ops".into())
+    );
+}
+
+#[test]
+fn quick_open_closes_on_escape_or_a_click_outside_and_says_when_nothing_matches() {
+    let mut ui = Ui::new();
+    ui.quick_open();
+    type_keys(&mut ui, "zzz");
+    ui.settle();
+    ui.harness.get_by_label("No matches");
+    ui.harness.key_press(egui::Key::Enter);
+    ui.settle();
+    ui.harness.key_press(egui::Key::Escape);
+    ui.settle();
+    assert!(ui.quick_open_is_closed());
+    assert_eq!(ui.order(), [feed("a")], "nothing opened");
+    // The layout bar button opens it too; a click elsewhere closes it.
+    ui.harness.get_by_label("Open…").click();
+    ui.settle();
+    ui.harness.get_by_label("Open a feed, board, or layout");
+    ui.click_at(ui.empty_canvas());
+    assert!(ui.quick_open_is_closed());
+}

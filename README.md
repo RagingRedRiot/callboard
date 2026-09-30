@@ -166,7 +166,10 @@ new one in the middle of the view; **Add card…** offers the same, the
 right-click menu can also remove a card, and dragging an entry onto the canvas
 places its card at the drop point. The sidebar lists saved layouts, feeds with
 error/stale markers, and boards, each with its item count (visible and snoozed
-for feeds). The GUI opens the layout that was active when it last ran, or else
+for feeds). **Ctrl+K** (or **Open…** in the layout bar) finds a feed,
+board, or layout by name: type part of it, pick with Up/Down or the pointer,
+and press Enter to reveal or place the card, or to switch layouts. The GUI
+opens the layout that was active when it last ran, or else
 the first saved layout by name. Cards whose feed or board was deleted stay in
 place as placeholders.
 

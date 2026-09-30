@@ -780,6 +780,24 @@ complete, so this is GUI-only (new `board.rs`).
 - Known: pressing a handle raises the feed card, which can cover part of an
   overlapping board card during the drag.
 
+## Quick open (Ctrl+K)
+
+- DESIGN.md §6.1 specifies it. `quick.rs` ranks feeds (by title or name),
+  boards, the deleted-board archive, and layouts: prefix, then word start,
+  then substring, then the typed letters in order; ties keep sidebar order,
+  and at most 12 are listed. Up/Down select, Enter or a click opens (the same
+  `Show`/`Switch` actions as the sidebar), Escape or a click outside closes.
+  The shortcut is consumed before widgets draw, so it works from a text
+  field; it is ignored while a dialog is open. **Open…** in the layout bar
+  opens it too.
+- Tests: ranking and alias matching; Ctrl+K typing then Enter places a card,
+  arrow selection, switching layouts by click, no matches, Escape, the
+  button, and a click outside.
+- Desktop: opened it from a board's add field, filtered, moved with Down, and
+  Enter revealed the card. Fixed from that: entries are left-aligned, and the
+  hint says Up/Down (egui's fonts lack ↑↓).
+
 ## Suggested next
 
-Quick open (Ctrl+K). Feed items could reorder by the same handle (§6.2).
+Feed items could reorder by their drag handle (§6.2). Otherwise, polish from
+real use of board editing, drag-to-promote, and quick open.

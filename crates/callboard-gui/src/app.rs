@@ -4,6 +4,7 @@ use crate::{
     backend::{self, Contents, Fetched, ListData, PromoteKind, Request, Target},
     board::{self, BoardOp, Kind},
     events::{self, Signal},
+    quick::{self, Choice, QuickOpen},
     sync::{Link, Outcome, POLL_INTERVAL, Scheduler},
     workspace::{self, CardState, LayoutEntry, LayoutKey, Layouts, TITLE_HEIGHT},
 };
@@ -216,6 +217,7 @@ pub enum Action {
     Prompt(PromptKind),
     /// Ask to confirm a deletion.
     ConfirmDelete(DeleteSubject),
+    QuickOpen,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -355,6 +357,7 @@ pub struct App {
     pub cache: Cache,
     pub prompt: Option<NamePrompt>,
     pub delete_prompt: Option<DeletePrompt>,
+    pub quick: Option<QuickOpen>,
     /// The layout last sent as the startup preference (or read from it).
     remembered: Option<LayoutKey>,
     /// The last failed snooze or promotion, until dismissed.
@@ -548,6 +551,7 @@ impl App {
             cache: Cache::default(),
             prompt: None,
             delete_prompt: None,
+            quick: None,
             remembered: None,
             write_error: None,
             canvas_area: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0)),
@@ -1003,6 +1007,7 @@ impl App {
                     select_all: true,
                 })
             }
+            Action::QuickOpen => self.quick = Some(QuickOpen::default()),
             Action::ConfirmDelete(subject) => {
                 self.delete_prompt = Some(DeletePrompt {
                     subject,
@@ -1106,6 +1111,10 @@ impl App {
             .min(Duration::from_secs(1)); // Ages and stale markers tick.
         ui.ctx().request_repaint_after(wait);
         let mut actions = Vec::new();
+        let dialog = self.closing || self.prompt.is_some() || self.delete_prompt.is_some();
+        if !dialog && ui.input_mut(|i| i.consume_shortcut(&quick::SHORTCUT)) {
+            actions.push(Action::QuickOpen);
+        }
         egui::Panel::top("layout_bar")
             .show(ui, |ui| self.layout_bar(ui, now, &entries, &mut actions));
         if let Some(error) = self.worker_error.clone().or(self.cache.error.clone()) {
@@ -1139,9 +1148,57 @@ impl App {
         } else {
             self.prompt_window(ui);
             self.delete_window(ui);
+            self.quick_open_window(ui, &entries, &placed, &mut actions);
             for action in actions {
                 self.apply(action);
             }
+        }
+    }
+
+    fn quick_open_window(
+        &mut self,
+        ui: &mut egui::Ui,
+        entries: &[LayoutEntry],
+        placed: &BTreeSet<Target>,
+        actions: &mut Vec<Action>,
+    ) {
+        let Some(state) = &mut self.quick else {
+            return;
+        };
+        let target = |kind, title, target: Target| {
+            let placed = placed.contains(&target);
+            Choice::target(kind, title, target, placed)
+        };
+        let choices: Vec<Choice> = self
+            .cache
+            .feeds
+            .iter()
+            .map(|f| {
+                target(
+                    "Feed",
+                    f.info.title.clone(),
+                    Target::Feed(f.info.name.clone()),
+                )
+            })
+            .chain(
+                self.cache
+                    .boards
+                    .iter()
+                    .map(|b| target("Board", b.info.name.clone(), Target::Board(b.info.id))),
+            )
+            .chain([target(
+                "Archive",
+                "Deleted-board archive".into(),
+                Target::Archive,
+            )])
+            .chain(
+                entries
+                    .iter()
+                    .map(|e| Choice::layout(e.key.clone(), e.active)),
+            )
+            .collect();
+        if !quick::show(ui, state, &choices, actions) {
+            self.quick = None;
         }
     }
 
@@ -1240,6 +1297,13 @@ impl App {
                 .clicked()
             {
                 actions.push(Action::ShowAll);
+            }
+            if ui
+                .small_button("Open…")
+                .on_hover_text("Find a feed, board, or layout by name (Ctrl+K)")
+                .clicked()
+            {
+                actions.push(Action::QuickOpen);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
