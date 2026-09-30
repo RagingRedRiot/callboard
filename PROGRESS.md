@@ -547,6 +547,20 @@ API changes. Feeds, boards, and items stay read-only.
 - Not done (need API sign-off): layout delete/rename, per-user
   last-layout preference, and sidebar counts for unplaced resources.
 
+### Session 20 follow-ups
+
+- Closing the window flushes pending named-layout saves, bypassing the debounce
+  and retry delays, and waits for the service to confirm them. A failed save
+  offers Retry, Keep window open, or Close without waiting.
+- **Add panel…** in the sidebar offers each feed, board, and the deleted-board
+  archive with the same placement choices as the right-click menu.
+- A layout list fetched while a save is in flight is discarded and refetched,
+  so it cannot revert the working copy to the pre-save tree.
+- The scheduler no longer reports expired deadlines while a batch is in flight,
+  which had let the UI spin until the batch finished.
+- Full local workflow passed; the GUI suite was stable over five repeated runs.
+  The close flow is covered by headless tests; not manually exercised in X11.
+
 ## Suggested session 21
 
 Decide the API additions (layout delete/rename, item counts in

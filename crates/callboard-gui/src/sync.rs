@@ -174,6 +174,11 @@ impl Scheduler {
         self.everything = true;
     }
 
+    pub fn refresh_layouts(&mut self) {
+        self.dirty_lists.insert(List::Layouts);
+        self.lists_retry = None;
+    }
+
     fn invalidate(&mut self, change: Change) {
         match change {
             Change::Feed { name } => {
@@ -303,6 +308,11 @@ impl Scheduler {
 
     /// How long the UI may sleep before [`Self::poll`] could return work.
     pub fn next_deadline(&self, now: Instant) -> Option<Duration> {
+        // The worker wakes the UI when this batch finishes. Timers cannot
+        // start another batch meanwhile, even if their deadlines have passed.
+        if self.busy() {
+            return None;
+        }
         let mut deadlines: Vec<Instant> = self.wake.values().copied().collect();
         if !self.dirty_lists.is_empty()
             && let Some(retry) = self.lists_retry
@@ -328,6 +338,26 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_deadlines_sleep_until_the_in_flight_batch_finishes() {
+        let now = Instant::now();
+        let mut scheduler = Scheduler::new(now);
+        scheduler.signal(Signal::Disconnected(Some("offline".into())), now);
+        let open = BTreeSet::from([Target::Feed("a".into())]);
+        scheduler.wake_at(Target::Feed("a".into()), now + Duration::from_secs(3));
+        assert!(
+            scheduler
+                .poll(now + OFFLINE_GRACE, &open, |_, _| false)
+                .is_some()
+        );
+        let later = now + Duration::from_secs(8);
+        assert!(scheduler.poll(later, &open, |_, _| false).is_none());
+        assert_eq!(scheduler.next_deadline(later), None);
+        scheduler.finished(later, &Outcome::default());
+        assert_eq!(scheduler.next_deadline(later), Some(Duration::ZERO));
+        assert!(scheduler.poll(later, &open, |_, _| false).is_some());
+    }
 
     fn open(targets: &[Target]) -> BTreeSet<Target> {
         targets.iter().cloned().collect()

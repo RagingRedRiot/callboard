@@ -131,6 +131,76 @@ fn opens_the_first_saved_layout_with_loaded_panels() {
 }
 
 #[test]
+fn visible_add_panel_menu_splits_without_a_right_click() {
+    let mut ui = Ui::new();
+    ui.harness.get_by_label("Add panel…").click();
+    ui.settle();
+    ui.harness.get_by_label_contains("Board: Inbox").click();
+    ui.settle();
+    ui.harness.get_by_label("Split right").click();
+    ui.settle();
+    let Panel::Split { axis, children, .. } = ui.panel() else {
+        panic!("expected a split")
+    };
+    assert_eq!(axis, Axis::Horizontal);
+    assert_eq!(children[1], Panel::Board { id: 2 });
+}
+
+#[test]
+fn closing_after_a_failed_save_can_retry_and_wait_for_confirmation() {
+    let mut ui = Ui::new();
+    ui.harness.get_by_label("Inbox").click();
+    ui.settle();
+    ui.harness
+        .input_mut()
+        .viewports
+        .get_mut(&egui::ViewportId::ROOT)
+        .unwrap()
+        .events
+        .push(egui::ViewportEvent::Close);
+    ui.harness.step();
+    let job = ui.ends.saves.try_recv().expect("close flushes debounce");
+    ui.ends
+        .saved
+        .send(SaveDone {
+            job,
+            result: Err("Service unavailable".into()),
+        })
+        .unwrap();
+    ui.settle();
+    ui.harness.get_by_label("Service unavailable");
+    assert!(
+        !ui.harness.output().viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .contains(&egui::ViewportCommand::Close)
+    );
+    ui.harness.get_by_label("Retry saving").click();
+    ui.settle();
+    let job = ui
+        .ends
+        .saves
+        .try_recv()
+        .expect("retry bypasses normal backoff");
+    ui.ends
+        .saved
+        .send(SaveDone {
+            result: Ok(NamedLayout {
+                name: job.name.clone(),
+                tree: job.tree.clone(),
+                updated_at_ms: 2,
+            }),
+            job,
+        })
+        .unwrap();
+    ui.harness.step();
+    assert!(
+        ui.harness.output().viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .contains(&egui::ViewportCommand::Close)
+    );
+}
+
+#[test]
 fn clicking_a_sidebar_entry_opens_it_as_a_tab_and_clicking_again_reveals_it() {
     let mut ui = Ui::new();
     ui.harness.get_by_label("b title").click();

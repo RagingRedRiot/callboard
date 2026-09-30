@@ -234,6 +234,13 @@ pub struct App {
     pub cache: Cache,
     pub prompt: Option<NamePrompt>,
     worker_error: Option<String>,
+    // A save completed while the current fetch might still contain an older
+    // layout list. Discard that list and fetch again after the batch completes.
+    discard_layout_list: bool,
+    pending_saves: usize,
+    closing: bool,
+    close_error: Option<String>,
+    allow_close: bool,
 }
 
 impl App {
@@ -338,6 +345,11 @@ impl App {
             cache: Cache::default(),
             prompt: None,
             worker_error: None,
+            discard_layout_list: false,
+            pending_saves: 0,
+            closing: false,
+            close_error: None,
+            allow_close: false,
         }
     }
 
@@ -345,11 +357,11 @@ impl App {
         while let Ok(signal) = self.channels.signals.try_recv() {
             self.scheduler.signal(signal, now);
         }
-        while let Ok(fetched) = self.channels.responses.try_recv() {
-            self.apply_fetched(fetched, now);
-        }
         while let Ok(done) = self.channels.saved.try_recv() {
             self.apply_saved(done, now);
+        }
+        while let Ok(fetched) = self.channels.responses.try_recv() {
+            self.apply_fetched(fetched, now);
         }
     }
 
@@ -371,7 +383,11 @@ impl App {
                             self.cache.boards = boards;
                             self.cache.boards_loaded = true;
                         }
-                        ListData::Layouts(layouts) => self.layouts.sync_saved(&layouts),
+                        ListData::Layouts(layouts) => {
+                            if !self.discard_layout_list {
+                                self.layouts.sync_saved(&layouts);
+                            }
+                        }
                     }
                 }
                 Err(error) => {
@@ -411,9 +427,17 @@ impl App {
             self.cache.refreshed_at = Some(now);
         }
         self.scheduler.finished(now, &outcome);
+        self.discard_layout_list = false;
     }
 
     fn apply_saved(&mut self, done: SaveDone, now: Instant) {
+        self.pending_saves = self.pending_saves.saturating_sub(1);
+        if done.result.is_ok() {
+            self.discard_layout_list |= self.scheduler.busy();
+            self.scheduler.refresh_layouts();
+        } else if self.closing {
+            self.close_error = done.result.as_ref().err().cloned();
+        }
         let SaveJob { name, purpose, .. } = done.job;
         let stored = done.result.map(|layout| layout.tree);
         match purpose {
@@ -473,6 +497,7 @@ impl App {
         };
         match self.channels.saves.try_send(job) {
             Ok(()) => {
+                self.pending_saves += 1;
                 prompt.waiting = true;
                 prompt.error = None;
             }
@@ -550,7 +575,16 @@ impl App {
             self.worker_error =
                 Some("The service connection worker stopped. Restart the application.".into());
         }
-        for (name, tree) in self.layouts.due_saves(now) {
+        let saves = if self.closing {
+            if self.close_error.is_none() {
+                self.layouts.flush_saves(now)
+            } else {
+                Vec::new()
+            }
+        } else {
+            self.layouts.due_saves(now)
+        };
+        for (name, tree) in saves {
             let job = SaveJob {
                 name: name.clone(),
                 tree,
@@ -558,7 +592,12 @@ impl App {
             };
             if self.channels.saves.try_send(job).is_err() {
                 let error = "The layout saver is busy or stopped".to_string();
+                if self.closing {
+                    self.close_error = Some(error.clone());
+                }
                 self.layouts.save_finished(&name, Err(error), now);
+            } else {
+                self.pending_saves += 1;
             }
         }
         open
@@ -566,6 +605,11 @@ impl App {
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let now = Instant::now();
+        if ui.input(|i| i.viewport().close_requested()) && !self.allow_close {
+            self.closing = true;
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
         // Computed once per frame: both walk every working tree.
         let placed = self.tick(now);
         let entries = self.layouts.entries();
@@ -573,7 +617,11 @@ impl App {
             .scheduler
             .next_deadline(now)
             .into_iter()
-            .chain(self.layouts.next_save_deadline(now))
+            .chain(
+                (!self.closing)
+                    .then(|| self.layouts.next_save_deadline(now))
+                    .flatten(),
+            )
             .min()
             .unwrap_or(Duration::MAX)
             .min(Duration::from_secs(1)); // Ages and stale markers tick.
@@ -588,10 +636,55 @@ impl App {
             .default_size(240.0)
             .show(ui, |ui| self.sidebar(ui, &entries, &placed, &mut actions));
         egui::CentralPanel::default().show(ui, |ui| self.panels(ui, &mut actions));
-        self.prompt_window(ui);
-        for action in actions {
-            self.apply(action);
+        if self.closing {
+            self.close_window(ui);
+        } else {
+            self.prompt_window(ui);
+            for action in actions {
+                self.apply(action);
+            }
         }
+    }
+
+    fn close_window(&mut self, ui: &mut egui::Ui) {
+        let pending =
+            self.pending_saves > 0 || self.layouts.entries().iter().any(|e| e.pending || e.saving);
+        if !pending && self.close_error.is_none() {
+            self.allow_close = true;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        egui::Modal::new(egui::Id::new("save_before_close")).show(ui.ctx(), |ui| {
+            ui.heading("Saving layouts before closing");
+            if let Some(error) = &self.close_error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+                if ui.button("Retry saving").clicked() {
+                    self.close_error = None;
+                    // A failed Save as/New request is not an auto-save.
+                    if self
+                        .prompt
+                        .as_ref()
+                        .is_some_and(|p| !p.waiting && p.error.is_some())
+                    {
+                        self.submit_prompt();
+                        if let Some(error) = self.prompt.as_ref().and_then(|p| p.error.clone()) {
+                            self.close_error = Some(error);
+                        }
+                    }
+                }
+            } else {
+                ui.spinner();
+                ui.label("Waiting for the service to confirm your changes…");
+            }
+            if ui.button("Keep window open").clicked() {
+                self.closing = false;
+                self.close_error = None;
+            }
+            if ui.button("Close without waiting").clicked() {
+                self.allow_close = true;
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
     }
 
     fn layout_bar(
@@ -720,6 +813,28 @@ impl App {
         let focused = workspace.focused_target().cloned();
         let has_focus = focused.is_some();
         egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.menu_button("Add panel…", |ui| {
+                let choices = self
+                    .cache
+                    .feeds
+                    .iter()
+                    .map(|f| (Target::Feed(f.name.clone()), format!("Feed: {}", f.title)))
+                    .chain(
+                        self.cache
+                            .boards
+                            .iter()
+                            .map(|b| (Target::Board(b.id), format!("Board: {}", b.name))),
+                    )
+                    .chain([(Target::Archive, "Deleted-board archive".to_owned())]);
+                for (target, title) in choices {
+                    ui.push_id(&target, |ui| {
+                        ui.menu_button(title, |ui| {
+                            placement_menu(ui, &target, has_focus, actions);
+                        });
+                    });
+                }
+            });
+            ui.separator();
             ui.heading("Layouts");
             for entry in entries {
                 let mut text = entry.key.label().to_string();
@@ -779,7 +894,9 @@ impl App {
                 },
             );
             ui.separator();
-            ui.weak("Click to show. Right-click to open in a new tab or split.");
+            ui.weak(
+                "Click to show. Use Add panel… for a new tab or split, or right-click an entry.",
+            );
             ui.weak("Counts appear for placed feeds and boards.");
         });
     }
@@ -814,17 +931,7 @@ impl App {
                 actions.push(Action::Show(target.clone()));
             }
             response.context_menu(|ui| {
-                for (label, placement, enabled) in [
-                    ("Open in new tab", Placement::Tab, true),
-                    ("Split right", Placement::Right, true),
-                    ("Split below", Placement::Below, true),
-                    ("Show in focused panel", Placement::Replace, has_focus),
-                ] {
-                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-                        actions.push(Action::Place(target.clone(), placement));
-                        ui.close();
-                    }
-                }
+                placement_menu(ui, target, has_focus, actions);
             });
             if let Some(counts) = self.cache.counts(target) {
                 ui.weak(counts.shown.to_string());
@@ -869,7 +976,7 @@ impl App {
         let workspace = self.layouts.active_mut();
         if workspace.tree.is_empty() {
             ui.heading("No panels in this layout");
-            ui.label("Click a feed or board in the sidebar to show it here. Right-click an entry to open it in a new tab or split.");
+            ui.label("Click a feed or board in the sidebar to show it here. Use Add panel… to open a new tab or split.");
             return;
         }
         let tree_id = workspace.tree.id();
@@ -1085,6 +1192,21 @@ impl Panes<'_> {
                 tile,
                 target,
             });
+        }
+    }
+}
+
+/// Shared by the visible Add panel menu and resource context menus.
+fn placement_menu(ui: &mut egui::Ui, target: &Target, has_focus: bool, actions: &mut Vec<Action>) {
+    for (label, placement, enabled) in [
+        ("Open in new tab", Placement::Tab, true),
+        ("Split right", Placement::Right, true),
+        ("Split below", Placement::Below, true),
+        ("Show in focused panel", Placement::Replace, has_focus),
+    ] {
+        if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+            actions.push(Action::Place(target.clone(), placement));
+            ui.close();
         }
     }
 }
@@ -1331,6 +1453,123 @@ mod tests {
         fn request(&self) -> Request {
             self.requests.try_recv().expect("a fetch request")
         }
+    }
+
+    #[test]
+    fn a_list_overlapping_a_save_is_discarded_then_refetched() {
+        for same_frame in [false, true] {
+            let (mut app, ends) = App::for_tests();
+            let now = Instant::now();
+            let old = NamedLayout {
+                name: "Day".into(),
+                tree: Panel::Feed { name: "a".into() },
+                updated_at_ms: 1,
+            };
+            app.layouts.sync_saved(std::slice::from_ref(&old));
+            app.apply(Action::Place(Target::Board(2), Placement::Right));
+            app.tick(now);
+            ends.requests.try_recv().unwrap(); // Leave the old fetch in flight.
+            app.tick(now + workspace::SAVE_DELAY);
+            let job = ends.saves.try_recv().unwrap();
+            let tree = job.tree.clone();
+            ends.saved
+                .send(SaveDone {
+                    result: Ok(NamedLayout {
+                        name: job.name.clone(),
+                        tree: tree.clone(),
+                        updated_at_ms: 2,
+                    }),
+                    job,
+                })
+                .unwrap();
+            if !same_frame {
+                app.tick(now + workspace::SAVE_DELAY);
+            }
+            ends.responses
+                .send(Fetched {
+                    lists: vec![(backend::List::Layouts, Ok(ListData::Layouts(vec![old])))],
+                    targets: vec![],
+                })
+                .unwrap();
+            app.tick(now + workspace::SAVE_DELAY);
+            assert_eq!(app.layouts.active().panel(), tree);
+            let next = ends
+                .requests
+                .try_recv()
+                .expect("fresh layout read after save");
+            assert!(next.lists.contains(&backend::List::Layouts));
+            // A later read is accepted, so edits from other windows still work.
+            ends.responses
+                .send(Fetched {
+                    lists: vec![(
+                        backend::List::Layouts,
+                        Ok(ListData::Layouts(vec![NamedLayout {
+                            name: "Day".into(),
+                            tree: Panel::Board { id: 3 },
+                            updated_at_ms: 3,
+                        }])),
+                    )],
+                    targets: vec![],
+                })
+                .unwrap();
+            app.tick(now + workspace::SAVE_DELAY);
+            assert_eq!(app.layouts.active().panel(), Panel::Board { id: 3 });
+        }
+    }
+
+    #[test]
+    fn native_close_flushes_all_layouts_and_waits_for_confirmation() {
+        let (mut app, ends) = App::for_tests();
+        app.layouts.sync_saved(&[NamedLayout {
+            name: "Day".into(),
+            tree: Panel::Feed { name: "a".into() },
+            updated_at_ms: 1,
+        }]);
+        app.apply(Action::Place(Target::Board(2), Placement::Right));
+        // Pending changes in an inactive layout must also be flushed.
+        app.apply(Action::Switch(LayoutKey::Unsaved));
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .events
+            .push(egui::ViewportEvent::Close);
+        let mut output = ctx.run_ui(input, |ui| app.show(ui));
+        output.textures_delta.clear();
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(commands.contains(&egui::ViewportCommand::CancelClose));
+        assert!(!commands.contains(&egui::ViewportCommand::Close));
+        let job = ends
+            .saves
+            .try_recv()
+            .expect("flush without waiting one second");
+        assert_eq!(job.name, "Day");
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.show(ui));
+        output.textures_delta.clear();
+        assert!(
+            !output.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .contains(&egui::ViewportCommand::Close)
+        );
+        ends.saved
+            .send(SaveDone {
+                result: Ok(NamedLayout {
+                    name: job.name.clone(),
+                    tree: job.tree.clone(),
+                    updated_at_ms: 2,
+                }),
+                job,
+            })
+            .unwrap();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.show(ui));
+        output.textures_delta.clear();
+        assert!(
+            output.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .contains(&egui::ViewportCommand::Close)
+        );
     }
 
     fn feed_info(name: &str) -> FeedInfo {

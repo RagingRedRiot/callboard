@@ -670,6 +670,15 @@ impl Layouts {
     /// Saved layouts with changes that have settled for [`SAVE_DELAY`]. Each
     /// returned save is in flight until [`Self::save_finished`].
     pub fn due_saves(&mut self, now: Instant) -> Vec<(String, Panel)> {
+        self.collect_saves(now, false)
+    }
+
+    /// Flush pending arrangements on close, bypassing debounce and retry delays.
+    pub fn flush_saves(&mut self, now: Instant) -> Vec<(String, Panel)> {
+        self.collect_saves(now, true)
+    }
+
+    fn collect_saves(&mut self, now: Instant, flush: bool) -> Vec<(String, Panel)> {
         let mut due = Vec::new();
         for (key, working) in &mut self.working {
             let LayoutKey::Saved(name) = key else {
@@ -699,7 +708,7 @@ impl Layouts {
                 .changed_at
                 .is_some_and(|t| now >= t + SAVE_DELAY);
             let retry_ok = working.save.retry_at.is_none_or(|t| now >= t);
-            if settled && retry_ok {
+            if flush || (settled && retry_ok) {
                 working.save.in_flight = true;
                 due.push((name.clone(), panel));
             }

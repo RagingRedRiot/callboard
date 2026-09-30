@@ -149,8 +149,9 @@ same kernel UID checks, data lock, and process lifecycle as CLI requests.
 
 The window arranges feeds and boards as panels in splits and tab groups
 (`egui_tiles`). Click a sidebar entry to show it (revealing it if already
-placed); right-click for new tab, split right/below, or show in the focused
-panel. Drag tabs to rearrange, use **Show…** in a tab bar to retarget the
+placed). Use **Add panel…** in the sidebar to choose a resource and open a new
+tab, split right/below, or show it in the focused panel. The same choices are
+available by right-clicking a resource. Drag tabs to rearrange, use **Show…** in a tab bar to retarget the
 active panel, and close panels from their tab. The sidebar lists saved layouts, feeds
 with error/stale markers, and boards; item counts appear for placed resources.
 The GUI opens the first saved layout by name. Panels whose feed or board was
@@ -166,7 +167,9 @@ open only when clicked; other URL schemes display as text.
 
 Arrangement changes save to the active layout automatically after a
 one-second pause (`PUT /layouts/{name}`); the layout bar shows saving, saved,
-or a failed save that is retried. **Save as…** stores the current arrangement
+or a failed save that is retried. Closing the window flushes pending named-layout
+changes and waits for confirmation; if saving fails, you can retry, keep the
+window open, or explicitly close without waiting. **Save as…** stores the current arrangement
 under a new name and **New layout…** creates an empty one; without any saved
 layout the window starts in an unnamed "Unsaved" arrangement. The
 deleted-board archive can be shown but is not stored in layouts. Saving
