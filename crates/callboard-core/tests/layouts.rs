@@ -146,3 +146,95 @@ async fn layout_replacement_survives_restart_and_target_deletion() {
     assert!(store.list_feeds().await.unwrap().is_empty());
     store.close().await;
 }
+
+#[tokio::test]
+async fn rename_delete_and_last_layout_preference() {
+    use callboard_core::store::{Change, PreferencesPatch, StoreError};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("layouts.sqlite3");
+    let store = Store::open(&path).await.unwrap();
+    let layout = Layout { tree: leaf() };
+    store.save_layout("Day", &layout).await.unwrap();
+    store.save_layout("Night", &layout).await.unwrap();
+    assert_eq!(store.preferences().await.unwrap().last_layout, None);
+
+    let set = |name: Option<&str>| PreferencesPatch {
+        last_layout: serde_json::from_value(json!(name)).unwrap(),
+    };
+    assert!(matches!(
+        store.patch_preferences(set(Some("Missing"))).await,
+        Err(StoreError::LayoutNotFound(_))
+    ));
+    assert!(matches!(
+        store.patch_preferences(set(Some(" bad"))).await,
+        Err(StoreError::Layout(_))
+    ));
+    let prefs = store.patch_preferences(set(Some("Day"))).await.unwrap();
+    assert_eq!(prefs.last_layout.as_deref(), Some("Day"));
+    // An empty patch changes nothing.
+    let prefs = store
+        .patch_preferences(PreferencesPatch::default())
+        .await
+        .unwrap();
+    assert_eq!(prefs.last_layout.as_deref(), Some("Day"));
+
+    let mut changes = store.subscribe();
+    assert!(matches!(
+        store.rename_layout("Day", "Night").await,
+        Err(StoreError::LayoutNameTaken(_))
+    ));
+    assert!(matches!(
+        store.rename_layout("Missing", "Other").await,
+        Err(StoreError::LayoutNotFound(_))
+    ));
+    assert!(store.rename_layout("Day", "").await.is_err());
+    assert!(changes.try_recv().is_err(), "failed renames stay silent");
+    let same = store.rename_layout("Day", "Day").await.unwrap();
+    assert_eq!(same.name, "Day");
+    assert!(changes.try_recv().is_err(), "no-op renames stay silent");
+
+    let renamed = store.rename_layout("Day", "Morning").await.unwrap();
+    assert_eq!(renamed.name, "Morning");
+    assert_eq!(renamed.tree, leaf());
+    for name in ["Day", "Morning"] {
+        assert_eq!(
+            changes.try_recv().unwrap(),
+            Change::Layout { name: name.into() }
+        );
+    }
+    let names: Vec<_> = store
+        .list_layouts()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| l.name)
+        .collect();
+    assert_eq!(names, ["Morning", "Night"]);
+    assert_eq!(
+        store.preferences().await.unwrap().last_layout.as_deref(),
+        Some("Morning"),
+        "the preference follows the rename"
+    );
+
+    assert!(!store.delete_layout("Missing").await.unwrap());
+    assert!(changes.try_recv().is_err());
+    assert!(store.delete_layout("Morning").await.unwrap());
+    assert_eq!(
+        changes.try_recv().unwrap(),
+        Change::Layout {
+            name: "Morning".into()
+        }
+    );
+    assert_eq!(store.preferences().await.unwrap().last_layout, None);
+
+    store.patch_preferences(set(Some("Night"))).await.unwrap();
+    store.close().await;
+    let store = Store::open(&path).await.unwrap();
+    assert_eq!(
+        store.preferences().await.unwrap().last_layout.as_deref(),
+        Some("Night")
+    );
+    let prefs = store.patch_preferences(set(None)).await.unwrap();
+    assert_eq!(prefs.last_layout, None);
+    store.close().await;
+}

@@ -23,6 +23,10 @@ pub enum StoreError {
     Layout(#[from] crate::layout::LayoutError),
     #[error("layout exceeds 64 KiB when serialized")]
     LayoutTooLarge,
+    #[error("layout not found: {0}")]
+    LayoutNotFound(String),
+    #[error("layout name is already in use: {0}")]
+    LayoutNameTaken(String),
     #[error(transparent)]
     Validation(#[from] ValidationError),
     #[error("snapshot exceeds 4 MiB when serialized")]
@@ -74,6 +78,34 @@ pub struct FeedInfo {
     /// UTC Unix milliseconds, refreshed by every accepted snapshot.
     pub last_submitted_at_ms: i64,
     pub error: Option<FeedError>,
+}
+
+/// A `GET /feeds` entry: metadata plus counts evaluated at read time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedSummary {
+    #[serde(flatten)]
+    pub info: FeedInfo,
+    pub item_count: usize,
+    pub snoozed_count: usize,
+    /// Earliest future time-snooze deadline; counts change then without a notice.
+    pub next_wake_at_ms: Option<i64>,
+}
+
+/// A `GET /boards` entry with active (non-archived) item counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardSummary {
+    #[serde(flatten)]
+    pub info: BoardInfo,
+    pub todo_count: usize,
+    pub open_todo_count: usize,
+    pub note_count: usize,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreferencesPatch {
+    #[serde(default)]
+    pub last_layout: PatchValue<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -439,6 +471,118 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// Returns false if the layout was already absent. A preference naming it
+    /// is cleared by the foreign key.
+    pub async fn delete_layout(&self, name: &str) -> Result<bool, StoreError> {
+        crate::layout::validate_name(name)?;
+        let deleted = sqlx::query("DELETE FROM layouts WHERE name = ?")
+            .bind(name)
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
+            != 0;
+        if deleted {
+            self.notify(Change::Layout {
+                name: name.to_owned(),
+            });
+        }
+        Ok(deleted)
+    }
+
+    /// Rename a layout without replacing another. A preference naming it follows
+    /// the rename through the foreign key. Renaming to itself is a no-op.
+    pub async fn rename_layout(
+        &self,
+        name: &str,
+        new_name: &str,
+    ) -> Result<crate::layout::NamedLayout, StoreError> {
+        crate::layout::validate_name(name)?;
+        crate::layout::validate_name(new_name)?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let row = sqlx::query_as::<_, (String, i64)>(
+            "SELECT tree_json, updated_at_ms FROM layouts WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| StoreError::LayoutNotFound(name.to_owned()))?;
+        if name == new_name {
+            tx.commit().await?;
+            return Ok(crate::layout::NamedLayout {
+                name: name.to_owned(),
+                tree: serde_json::from_str(&row.0)?,
+                updated_at_ms: row.1,
+            });
+        }
+        let taken = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM layouts WHERE name = ?")
+            .bind(new_name)
+            .fetch_one(&mut *tx)
+            .await?
+            != 0;
+        if taken {
+            return Err(StoreError::LayoutNameTaken(new_name.to_owned()));
+        }
+        let updated_at_ms = now_ms()?;
+        sqlx::query("UPDATE layouts SET name = ?, updated_at_ms = ? WHERE name = ?")
+            .bind(new_name)
+            .bind(updated_at_ms)
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        for name in [name, new_name] {
+            self.notify(Change::Layout {
+                name: name.to_owned(),
+            });
+        }
+        Ok(crate::layout::NamedLayout {
+            name: new_name.to_owned(),
+            tree: serde_json::from_str(&row.0)?,
+            updated_at_ms,
+        })
+    }
+
+    pub async fn preferences(&self) -> Result<crate::layout::Preferences, StoreError> {
+        let last_layout =
+            sqlx::query_scalar::<_, Option<String>>("SELECT last_layout FROM preferences")
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(crate::layout::Preferences { last_layout })
+    }
+
+    /// Apply the fields present in `patch`. `last_layout` must name an existing
+    /// layout. Preferences emit no change notice.
+    pub async fn patch_preferences(
+        &self,
+        patch: PreferencesPatch,
+    ) -> Result<crate::layout::Preferences, StoreError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let PatchValue(Some(last_layout)) = &patch.last_layout {
+            if let Some(name) = last_layout {
+                crate::layout::validate_name(name)?;
+                let exists =
+                    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM layouts WHERE name = ?")
+                        .bind(name)
+                        .fetch_one(&mut *tx)
+                        .await?
+                        != 0;
+                if !exists {
+                    return Err(StoreError::LayoutNotFound(name.clone()));
+                }
+            }
+            sqlx::query("UPDATE preferences SET last_layout = ?")
+                .bind(last_layout)
+                .execute(&mut *tx)
+                .await?;
+        }
+        let last_layout =
+            sqlx::query_scalar::<_, Option<String>>("SELECT last_layout FROM preferences")
+                .fetch_one(&mut *tx)
+                .await?;
+        tx.commit().await?;
+        Ok(crate::layout::Preferences { last_layout })
     }
 
     /// Open/create a database and apply embedded migrations. Requires a Tokio
@@ -836,6 +980,74 @@ impl Store {
                 .map(Into::into)
                 .collect(),
         )
+    }
+
+    /// Feed metadata with item and snooze counts, all from one snapshot.
+    pub async fn feed_summaries(&self) -> Result<Vec<FeedSummary>, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let rows = sqlx::query_as::<_, FeedRow>("SELECT * FROM feeds ORDER BY name")
+            .fetch_all(&mut *tx)
+            .await?;
+        let item_counts: HashMap<String, i64> =
+            sqlx::query_as("SELECT feed, count(*) FROM feed_items GROUP BY feed")
+                .fetch_all(&mut *tx)
+                .await?
+                .into_iter()
+                .collect();
+        let snoozes = sqlx::query_as::<_, (String, Option<i64>, i64)>(
+            "SELECT feed, snoozed_until_ms, wake_on_update FROM feed_item_view_state",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let current_time = now_ms()?;
+        let mut snoozed: HashMap<String, (usize, Option<i64>)> = HashMap::new();
+        for (feed, until, on_update) in snoozes {
+            let state = ItemViewState::effective(until, on_update != 0, current_time);
+            if state.snoozed {
+                let entry = snoozed.entry(feed).or_default();
+                entry.0 += 1;
+                if let Some(until) = state.snoozed_until_ms {
+                    entry.1 = Some(entry.1.map_or(until, |t| t.min(until)));
+                }
+            }
+        }
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let item_count = item_counts.get(&row.name).copied().unwrap_or(0) as usize;
+                let (snoozed_count, next_wake_at_ms) =
+                    snoozed.get(&row.name).copied().unwrap_or_default();
+                FeedSummary {
+                    info: row.into(),
+                    item_count,
+                    snoozed_count,
+                    next_wake_at_ms,
+                }
+            })
+            .collect())
+    }
+
+    /// User boards with active todo, open todo, and note counts.
+    pub async fn board_summaries(&self) -> Result<Vec<BoardSummary>, StoreError> {
+        let rows = sqlx::query_as::<_, (i64, String, i64, i64, i64)>(
+            "SELECT b.id, b.name,
+                (SELECT count(*) FROM todos t WHERE t.board_id = b.id AND t.archived_at_ms IS NULL),
+                (SELECT count(*) FROM todos t WHERE t.board_id = b.id AND t.archived_at_ms IS NULL AND t.done = 0),
+                (SELECT count(*) FROM notes n WHERE n.board_id = b.id AND n.archived_at_ms IS NULL)
+             FROM boards b WHERE b.is_archive = 0 ORDER BY b.name, b.id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, name, todos, open, notes)| BoardSummary {
+                info: BoardInfo { id, name },
+                todo_count: todos as usize,
+                open_todo_count: open as usize,
+                note_count: notes as usize,
+            })
+            .collect())
     }
 
     /// Record a fetch failure without touching items or the last submission.

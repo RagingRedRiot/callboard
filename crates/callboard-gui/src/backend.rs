@@ -2,8 +2,8 @@
 //! client lifecycle, so at most one detached service runs per data directory.
 use callboard::{client, lifecycle::Paths};
 use callboard_core::{
-    layout::NamedLayout,
-    store::{BoardContents, BoardInfo, Feed, FeedInfo},
+    layout::{NamedLayout, Preferences},
+    store::{BoardContents, BoardSummary, Feed, FeedSummary},
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -43,9 +43,10 @@ impl List {
 }
 
 pub enum ListData {
-    Feeds(Vec<FeedInfo>),
-    Boards(Vec<BoardInfo>),
-    Layouts(Vec<NamedLayout>),
+    Feeds(Vec<FeedSummary>),
+    Boards(Vec<BoardSummary>),
+    /// Layouts with the preferences naming the last one used.
+    Layouts(Vec<NamedLayout>, Preferences),
 }
 
 /// One batch of refetches. The UI keeps at most one batch in flight.
@@ -127,12 +128,10 @@ async fn list(paths: &Paths, auto: Option<&Path>, list: List) -> Result<ListData
     Ok(match list {
         List::Feeds => ListData::Feeds(required(paths, auto, "/feeds").await?),
         List::Boards => ListData::Boards(required(paths, auto, "/boards").await?),
-        // A service predating layouts has no route; browse without them.
-        List::Layouts => ListData::Layouts(match get(paths, auto, "/layouts").await {
-            Ok(layouts) => layouts.unwrap_or_default(),
-            Err(Failure::UnknownRoute(_)) => Vec::new(),
-            Err(e) => return Err(e),
-        }),
+        List::Layouts => ListData::Layouts(
+            required(paths, auto, "/layouts").await?,
+            required(paths, auto, "/preferences").await?,
+        ),
     })
 }
 
@@ -246,18 +245,17 @@ fn encode_segment(segment: &str) -> String {
         .collect()
 }
 
-/// Create or replace a named layout (`PUT /layouts/{name}`). The only write
-/// the GUI makes; feeds, boards, and items stay read-only.
-pub async fn save_layout(
+/// Send a layout write and decode its JSON reply. Layout writes are the
+/// GUI's only mutations; feeds, boards, and items stay read-only.
+async fn write<T: DeserializeOwned>(
     paths: &Paths,
     auto: Option<&Path>,
-    name: &str,
-    tree: &callboard_core::layout::Panel,
-) -> Result<NamedLayout, String> {
-    let body = serde_json::to_vec(&callboard_core::layout::Layout { tree: tree.clone() })
-        .map_err(|e| e.to_string())?;
-    let resource = format!("/layouts/{}", encode_segment(name));
-    let (status, bytes) = client::request(paths, "PUT", &resource, body, auto)
+    method: &str,
+    resource: &str,
+    body: &impl serde::Serialize,
+) -> Result<T, String> {
+    let body = serde_json::to_vec(body).map_err(|e| e.to_string())?;
+    let (status, bytes) = client::request(paths, method, resource, body, auto)
         .await
         .map_err(|e| e.to_string())?;
     if !status.is_success() {
@@ -268,6 +266,54 @@ pub async fn save_layout(
         return Err(format!("HTTP {status}: {message}"));
     }
     serde_json::from_slice(&bytes).map_err(|e| format!("Invalid service response: {e}"))
+}
+
+fn layout_resource(name: &str) -> String {
+    format!("/layouts/{}", encode_segment(name))
+}
+
+/// Create or replace a named layout (`PUT /layouts/{name}`).
+pub async fn save_layout(
+    paths: &Paths,
+    auto: Option<&Path>,
+    name: &str,
+    tree: &callboard_core::layout::Panel,
+) -> Result<NamedLayout, String> {
+    let layout = callboard_core::layout::Layout { tree: tree.clone() };
+    write(paths, auto, "PUT", &layout_resource(name), &layout).await
+}
+
+/// Rename without replacing another layout (`PATCH /layouts/{name}`).
+pub async fn rename_layout(
+    paths: &Paths,
+    auto: Option<&Path>,
+    name: &str,
+    new_name: &str,
+) -> Result<NamedLayout, String> {
+    let rename = callboard_core::layout::LayoutRename {
+        name: new_name.to_owned(),
+    };
+    write(paths, auto, "PATCH", &layout_resource(name), &rename).await
+}
+
+/// `DELETE /layouts/{name}`. Ok(false) when it was already gone.
+pub async fn delete_layout(paths: &Paths, auto: Option<&Path>, name: &str) -> Result<bool, String> {
+    #[derive(serde::Deserialize)]
+    struct Deleted {
+        deleted: bool,
+    }
+    let reply: Deleted = write(paths, auto, "DELETE", &layout_resource(name), &()).await?;
+    Ok(reply.deleted)
+}
+
+/// Record the layout to open at next startup (`PATCH /preferences`).
+pub async fn set_last_layout(
+    paths: &Paths,
+    auto: Option<&Path>,
+    name: Option<&str>,
+) -> Result<Preferences, String> {
+    let body = serde_json::json!({ "last_layout": name });
+    write(paths, auto, "PATCH", "/preferences", &body).await
 }
 
 #[cfg(test)]
@@ -284,9 +330,10 @@ mod tests {
     }
 
     struct Loaded {
-        feeds: Vec<FeedInfo>,
-        boards: Vec<BoardInfo>,
+        feeds: Vec<FeedSummary>,
+        boards: Vec<BoardSummary>,
         layouts: Vec<NamedLayout>,
+        preferences: Preferences,
     }
 
     fn loaded(fetched: Fetched) -> Loaded {
@@ -294,13 +341,17 @@ mod tests {
             feeds: vec![],
             boards: vec![],
             layouts: vec![],
+            preferences: Preferences::default(),
         };
         assert_eq!(fetched.lists.len(), 3);
         for (_, result) in fetched.lists {
             match result.unwrap() {
                 ListData::Feeds(f) => out.feeds = f,
                 ListData::Boards(b) => out.boards = b,
-                ListData::Layouts(l) => out.layouts = l,
+                ListData::Layouts(l, p) => {
+                    out.layouts = l;
+                    out.preferences = p;
+                }
             }
         }
         out
@@ -413,26 +464,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_service_without_layouts_still_lists_feeds_and_boards() {
-        let service = Service::new();
-        let fake = crate::testing::serve_fake(&service.paths, |path| match path {
-            "/feeds" => (
-                200,
-                r#"[{"name":"work","title":"Work","source_url":null,"stale_after":null,"last_submitted_at_ms":0,"error":null}]"#,
-            ),
-            "/boards" => (200, r#"[{"id":2,"name":"Inbox"}]"#),
-            _ => (404, r#"{"error":"unknown resource"}"#),
-        })
-        .await;
-        let view = fetch(&service.paths, None, &all(&[])).await;
-        let lists = loaded(view);
-        assert_eq!(lists.feeds[0].name, "work");
-        assert_eq!(lists.boards[0].name, "Inbox");
-        assert!(lists.layouts.is_empty());
-        fake.abort();
-    }
-
-    #[tokio::test]
     async fn an_unknown_route_404_is_an_error_not_a_deleted_target() {
         let service = Service::new();
         let fake = crate::testing::serve_fake(&service.paths, |path| match path {
@@ -511,6 +542,46 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.starts_with("HTTP 400"), "{error}");
+
+        let other = save_layout(&service.paths, None, "Other", &tree)
+            .await
+            .unwrap();
+        let taken = rename_layout(&service.paths, None, name, &other.name)
+            .await
+            .unwrap_err();
+        assert!(taken.starts_with("HTTP 409"), "{taken}");
+        let prefs = set_last_layout(&service.paths, None, Some(name))
+            .await
+            .unwrap();
+        assert_eq!(prefs.last_layout.as_deref(), Some(name));
+        let renamed = rename_layout(&service.paths, None, name, "Evening ✓")
+            .await
+            .unwrap();
+        assert_eq!(renamed.name, "Evening ✓");
+        assert_eq!(renamed.tree, tree);
+        let lists = loaded(fetch(&service.paths, None, &all(&[])).await);
+        assert_eq!(
+            lists.preferences.last_layout.as_deref(),
+            Some("Evening ✓"),
+            "the preference follows a rename"
+        );
+        assert!(
+            delete_layout(&service.paths, None, "Evening ✓")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !delete_layout(&service.paths, None, "Evening ✓")
+                .await
+                .unwrap()
+        );
+        let lists = loaded(fetch(&service.paths, None, &all(&[])).await);
+        assert_eq!(lists.preferences, Preferences::default());
+        assert_eq!(lists.layouts.len(), 1);
+        let missing = set_last_layout(&service.paths, None, Some("Gone"))
+            .await
+            .unwrap_err();
+        assert!(missing.starts_with("HTTP 404"), "{missing}");
         running.stop().await;
     }
 }

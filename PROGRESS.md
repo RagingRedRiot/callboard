@@ -561,9 +561,38 @@ API changes. Feeds, boards, and items stay read-only.
 - Full local workflow passed; the GUI suite was stable over five repeated runs.
   The close flow is covered by headless tests; not manually exercised in X11.
 
-## Suggested session 21
+## Session 21: layout management API, list counts, startup layout
 
-Decide the API additions (layout delete/rename, item counts in
-`GET /feeds`/`GET /boards`). Then add sidebar drag-to-place and quick open
-(Ctrl+K), and begin editing with snooze and promote, extending the
-interaction tests alongside.
+Scope agreed: all three pending API additions, then GUI snooze and promote.
+No backward compatibility is kept: callboard is unreleased, so the GUI assumes
+a matching service.
+
+- Added `PATCH /layouts/{name}` (rename; 404 missing, 409 taken, never
+  replaces) and `DELETE /layouts/{name}` (`{"deleted": bool}`), both emitting
+  layout notices, with `layout rename OLD NEW` and `layout rm NAME` CLI commands.
+- Added migration 0006 and `GET`/`PATCH /preferences` with `last_layout`. Its
+  foreign key to `layouts(name)` follows renames and clears on deletion, so the
+  preference never names a missing layout. Preferences emit no notice.
+- `GET /feeds` adds `item_count`, `snoozed_count`, and `next_wake_at_ms`;
+  `GET /boards` adds `todo_count`, `open_todo_count`, and `note_count` (active
+  items only). Counts are read in one snapshot. DESIGN.md §6.4 and §8.1 updated.
+- GUI: the sidebar shows counts for every feed and board, preferring loaded
+  panel contents; the feed list is refetched at the next snooze deadline.
+  **Rename…** and **Delete…** (with confirmation) act on the active saved
+  layout. Auto-saves of that layout are held while the request is in flight,
+  so a debounced save cannot recreate the old name; a rename keeps unsaved
+  changes, which then save under the new name. Deleting the active layout
+  opens the next saved one. The GUI opens the last active layout at startup
+  and records each change of active layout.
+- Removed the GUI's tolerance of a service without `/layouts`.
+- Tests: store rename/delete/preference/summary behaviour, HTTP and CLI
+  routes, backend round trips, workspace rename/delete/preference, the
+  feed-list wake, and five interaction tests (list counts, startup preference,
+  remembering, rename with refusal and retry, delete with confirmation). A
+  mutation check confirmed the counts and remembering tests fail without the
+  feature. Full local workflow passed; GUI suite stable over four runs.
+
+## Suggested next
+
+GUI editing: snooze and promote from feed panels, then sidebar drag-to-place
+and quick open (Ctrl+K).

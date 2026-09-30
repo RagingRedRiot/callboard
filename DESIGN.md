@@ -259,6 +259,20 @@ that name, returning the saved layout with HTTP 200. Names are case-sensitive,
 1–100 Unicode characters, without surrounding whitespace or control characters;
 encode the name as one URI path segment. An empty list is valid before any save.
 
+`PATCH /layouts/{name}` with `{"name": "New name"}` renames a layout and returns
+it with a new `updated_at_ms`; a missing layout is 404, and an existing layout
+with the new name is 409 (never replaced). Renaming to the same name changes
+nothing. `DELETE /layouts/{name}` returns `{"deleted": true}`, or `false` when
+the layout was already absent. Both emit layout notices: a rename names the old
+and the new layout.
+
+`GET /preferences` returns `{"last_layout": "Day"}` (or null): the layout the
+GUI opens at startup. `PATCH /preferences` sets it; `last_layout` must name an
+existing layout (404 otherwise) or be null, and an omitted field is unchanged.
+The preference follows layout renames and clears when its layout is deleted.
+Preference changes emit no notice. The GUI records the active layout whenever
+it changes and opens it at startup, falling back to the first layout by name.
+
 Tree nodes are tagged with `kind`:
 
 - `{"kind":"empty"}` represents an empty layout (root only).
@@ -366,6 +380,8 @@ directories are private to the user.
 | `DELETE /todos/{id}`, `DELETE /notes/{id}` | Delete permanently |
 | `POST /feeds/{name}/items/{key}/promote` | Promote to a todo or note (§5.3) |
 | `GET /layouts`, `PUT /layouts/{name}` | Read or save layouts |
+| `PATCH /layouts/{name}`, `DELETE /layouts/{name}` | Rename or delete a layout (§6.4) |
+| `GET /preferences`, `PATCH /preferences` | Read or set the startup layout (§6.4) |
 | `GET /events` | Change stream (§8.2) |
 
 Todo and note PATCH bodies contain only changed fields. JSON `null` clears an
@@ -386,6 +402,12 @@ first. `reset_order: true` returns the feed to submitted order and cannot be
 combined with `position`. Item keys in request paths must be percent-encoded
 as a single URI segment (including slashes in URL-shaped keys); the service
 decodes that segment exactly once.
+
+`GET /feeds` entries add `item_count`, `snoozed_count`, and `next_wake_at_ms`
+(the earliest future time-snooze deadline, or null) to the feed metadata; counts
+are evaluated at read time, so clients refetch the list at that deadline.
+`GET /boards` entries add `todo_count`, `open_todo_count`, and `note_count`,
+counting only items that are not archived.
 
 Promotion requests provide `board_id` and `kind` (`todo` or `note`). Promotion
 copies the current source title and URL, also copying its body when present;

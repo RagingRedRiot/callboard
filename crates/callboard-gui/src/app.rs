@@ -1,5 +1,5 @@
 //! The desktop window: resource sidebar, layout bar, and panel tree.
-//! The only write is saving layouts; feeds, boards, and items are read-only.
+//! The only writes manage layouts; feeds, boards, and items are read-only.
 use crate::{
     backend::{self, Contents, Fetched, ListData, Request, Target},
     events::{self, Signal},
@@ -9,7 +9,7 @@ use crate::{
 use callboard::lifecycle::Paths;
 use callboard_core::{
     layout::{NamedLayout, Panel},
-    store::{BoardContents, BoardInfo, Feed, FeedInfo, ResolvedReference},
+    store::{BoardContents, BoardSummary, Feed, FeedInfo, FeedSummary, ResolvedReference},
 };
 use eframe::egui;
 use egui_tiles::{Behavior, TileId, Tiles, UiResponse};
@@ -24,8 +24,8 @@ use std::{
 /// every cached entry is covered by event invalidation.
 #[derive(Default)]
 pub struct Cache {
-    pub feeds: Vec<FeedInfo>,
-    pub boards: Vec<BoardInfo>,
+    pub feeds: Vec<FeedSummary>,
+    pub boards: Vec<BoardSummary>,
     pub feeds_loaded: bool,
     pub boards_loaded: bool,
     pub contents: BTreeMap<Target, Entry>,
@@ -74,11 +74,15 @@ impl Cache {
     }
 
     fn feed(&self, name: &str) -> Option<&FeedInfo> {
-        self.feeds.iter().find(|f| f.name == name)
+        self.feeds.iter().map(|f| &f.info).find(|f| f.name == name)
     }
 
-    fn board(&self, id: i64) -> Option<&BoardInfo> {
-        self.boards.iter().find(|b| b.id == id)
+    fn feed_summary(&self, name: &str) -> Option<&FeedSummary> {
+        self.feeds.iter().find(|f| f.info.name == name)
+    }
+
+    fn board(&self, id: i64) -> Option<&BoardSummary> {
+        self.boards.iter().find(|b| b.info.id == id)
     }
 
     /// Whether the lists show the target as deleted (not merely unloaded).
@@ -100,13 +104,27 @@ impl Cache {
                 .map_or_else(|| name.clone(), |f| f.title.clone()),
             Target::Board(id) => self
                 .board(*id)
-                .map_or_else(|| format!("Board {id}"), |b| b.name.clone()),
+                .map_or_else(|| format!("Board {id}"), |b| b.info.name.clone()),
             Target::Archive => "Deleted-board archive".into(),
         }
     }
 
+    /// Counts from loaded contents when placed, otherwise from the lists.
     pub fn counts(&self, target: &Target) -> Option<Counts> {
-        match self.contents.get(target)?.contents.as_ref()? {
+        let Some(contents) = self.contents.get(target).and_then(|e| e.contents.as_ref()) else {
+            return match target {
+                Target::Feed(name) => self.feed_summary(name).map(|f| Counts {
+                    shown: f.item_count.saturating_sub(f.snoozed_count),
+                    snoozed: f.snoozed_count,
+                }),
+                Target::Board(id) => self.board(*id).map(|b| Counts {
+                    shown: b.todo_count + b.note_count,
+                    snoozed: 0,
+                }),
+                Target::Archive => None,
+            };
+        };
+        match contents {
             Contents::Feed(feed) => {
                 let snoozed = feed
                     .items
@@ -178,6 +196,8 @@ pub enum Action {
     Revert,
     Refresh,
     Prompt(PromptKind),
+    /// Ask to confirm deleting the active saved layout.
+    ConfirmDelete,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,21 +222,53 @@ pub struct SaveDone {
     pub result: Result<NamedLayout, String>,
 }
 
+/// Layout management requests, sent in order on their own worker.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LayoutOp {
+    Rename {
+        from: String,
+        to: String,
+    },
+    Delete {
+        name: String,
+    },
+    /// The layout to open at next startup; `None` for the Unsaved arrangement.
+    Remember {
+        name: Option<String>,
+    },
+}
+
+pub struct OpDone {
+    pub op: LayoutOp,
+    /// The renamed layout for a rename; `None` otherwise.
+    pub result: Result<Option<NamedLayout>, String>,
+}
+
 pub struct Channels {
     pub requests: mpsc::SyncSender<Request>,
     pub responses: mpsc::Receiver<Fetched>,
     pub signals: mpsc::Receiver<Signal>,
     pub saves: mpsc::SyncSender<SaveJob>,
     pub saved: mpsc::Receiver<SaveDone>,
+    pub ops: mpsc::SyncSender<LayoutOp>,
+    pub ops_done: mpsc::Receiver<OpDone>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
     SaveAs,
     New,
+    Rename,
 }
 
-/// The layout-name dialog for "Save as…" and "New layout…".
+/// Confirmation for deleting a saved layout.
+pub struct DeletePrompt {
+    pub name: String,
+    pub error: Option<String>,
+    pub waiting: bool,
+}
+
+/// The layout-name dialog for "Save as…", "New layout…", and "Rename…".
 pub struct NamePrompt {
     pub kind: PromptKind,
     pub text: String,
@@ -233,6 +285,9 @@ pub struct App {
     pub layouts: Layouts,
     pub cache: Cache,
     pub prompt: Option<NamePrompt>,
+    pub delete_prompt: Option<DeletePrompt>,
+    /// The layout last sent as the startup preference (or read from it).
+    remembered: Option<LayoutKey>,
     worker_error: Option<String>,
     // A save completed while the current fetch might still contain an older
     // layout list. Discard that list and fetch again after the batch completes.
@@ -304,6 +359,41 @@ impl App {
                 }
             })
             .map_err(|e| e.to_string())?;
+        let (ops, op_jobs) = mpsc::sync_channel::<LayoutOp>(8);
+        let (op_done, ops_done) = mpsc::sync_channel(8);
+        let op_runtime = runtime()?;
+        let op_paths = paths.clone();
+        let op_auto_start = auto_start.clone();
+        let op_ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("callboard-layout-ops".into())
+            .spawn(move || {
+                while let Ok(op) = op_jobs.recv() {
+                    let (paths, auto) = (&op_paths, op_auto_start.as_deref());
+                    let result = op_runtime.block_on(async {
+                        match &op {
+                            LayoutOp::Rename { from, to } => {
+                                backend::rename_layout(paths, auto, from, to)
+                                    .await
+                                    .map(Some)
+                            }
+                            LayoutOp::Delete { name } => backend::delete_layout(paths, auto, name)
+                                .await
+                                .map(|_| None),
+                            LayoutOp::Remember { name } => {
+                                backend::set_last_layout(paths, auto, name.as_deref())
+                                    .await
+                                    .map(|_| None)
+                            }
+                        }
+                    });
+                    if op_done.send(OpDone { op, result }).is_err() {
+                        break;
+                    }
+                    op_ctx.request_repaint();
+                }
+            })
+            .map_err(|e| e.to_string())?;
         // Bounded: if the window stops draining, the subscriber blocks, the
         // service marks it lagged, and a resync follows once it catches up.
         let (signal_tx, signals) = mpsc::sync_channel(256);
@@ -327,6 +417,8 @@ impl App {
                 signals,
                 saves,
                 saved,
+                ops,
+                ops_done,
             },
         ))
     }
@@ -344,6 +436,8 @@ impl App {
             layouts: Layouts::new(),
             cache: Cache::default(),
             prompt: None,
+            delete_prompt: None,
+            remembered: None,
             worker_error: None,
             discard_layout_list: false,
             pending_saves: 0,
@@ -359,6 +453,9 @@ impl App {
         }
         while let Ok(done) = self.channels.saved.try_recv() {
             self.apply_saved(done, now);
+        }
+        while let Ok(done) = self.channels.ops_done.try_recv() {
+            self.apply_op(done);
         }
         while let Ok(fetched) = self.channels.responses.try_recv() {
             self.apply_fetched(fetched, now);
@@ -376,6 +473,15 @@ impl App {
                     succeeded = true;
                     match data {
                         ListData::Feeds(feeds) => {
+                            // Snooze expiry changes counts without a notice.
+                            let now_ms = now_ms();
+                            let wake = feeds
+                                .iter()
+                                .filter_map(|f| f.next_wake_at_ms)
+                                .filter(|at| *at > now_ms)
+                                .min()
+                                .map(|at| now + Duration::from_millis((at - now_ms) as u64 + 50));
+                            self.scheduler.wake_feed_list_at(wake);
                             self.cache.feeds = feeds;
                             self.cache.feeds_loaded = true;
                         }
@@ -383,8 +489,17 @@ impl App {
                             self.cache.boards = boards;
                             self.cache.boards_loaded = true;
                         }
-                        ListData::Layouts(layouts) => {
+                        ListData::Layouts(layouts, preferences) => {
                             if !self.discard_layout_list {
+                                if !self.layouts.loaded() {
+                                    self.remembered = Some(
+                                        preferences
+                                            .last_layout
+                                            .clone()
+                                            .map_or(LayoutKey::Unsaved, LayoutKey::Saved),
+                                    );
+                                    self.layouts.prefer(preferences.last_layout);
+                                }
                                 self.layouts.sync_saved(&layouts);
                             }
                         }
@@ -447,6 +562,69 @@ impl App {
         }
     }
 
+    fn apply_op(&mut self, done: OpDone) {
+        if done.result.is_ok() && !matches!(done.op, LayoutOp::Remember { .. }) {
+            // A list fetched before this commit would bring the old name back.
+            self.discard_layout_list |= self.scheduler.busy();
+            self.scheduler.refresh_layouts();
+        }
+        match (done.op, done.result) {
+            (LayoutOp::Rename { from, .. }, Ok(Some(layout))) => {
+                self.layouts.renamed(&from, &layout);
+                self.prompt = None;
+            }
+            (LayoutOp::Delete { name }, Ok(_)) => {
+                self.layouts.deleted(&name);
+                self.delete_prompt = None;
+            }
+            (LayoutOp::Rename { from, .. }, result) => {
+                self.layouts.end_op(&from);
+                if let Some(prompt) = &mut self.prompt {
+                    prompt.waiting = false;
+                    prompt.error = Some(
+                        result
+                            .err()
+                            .unwrap_or_else(|| "Invalid service response".into()),
+                    );
+                }
+            }
+            (LayoutOp::Delete { name }, Err(error)) => {
+                self.layouts.end_op(&name);
+                if let Some(prompt) = &mut self.delete_prompt {
+                    prompt.waiting = false;
+                    prompt.error = Some(error);
+                }
+            }
+            // The preference only picks the startup layout; a failure is not
+            // worth interrupting the user for.
+            (LayoutOp::Remember { .. }, _) => (),
+        }
+    }
+
+    /// Delete the layout named in the confirmation dialog.
+    pub fn confirm_delete(&mut self) {
+        let Some(prompt) = &mut self.delete_prompt else {
+            return;
+        };
+        if !self.layouts.begin_op(&prompt.name) {
+            prompt.error = Some("Wait for the current save to finish".into());
+            return;
+        }
+        let op = LayoutOp::Delete {
+            name: prompt.name.clone(),
+        };
+        match self.channels.ops.try_send(op) {
+            Ok(()) => {
+                prompt.waiting = true;
+                prompt.error = None;
+            }
+            Err(_) => {
+                self.layouts.end_op(&prompt.name);
+                prompt.error = Some("The layout worker is busy or stopped; try again".into());
+            }
+        }
+    }
+
     fn finish_prompt(
         &mut self,
         from: Option<&LayoutKey>,
@@ -477,6 +655,38 @@ impl App {
             prompt.error = Some(e.to_string());
             return;
         }
+        if prompt.kind == PromptKind::Rename {
+            let LayoutKey::Saved(from) = self.layouts.active_key().clone() else {
+                self.prompt = None;
+                return;
+            };
+            if from == name {
+                self.prompt = None;
+                return;
+            }
+            if self.layouts.exists(&name) {
+                prompt.error = Some(format!("A layout named “{name}” already exists"));
+                return;
+            }
+            if !self.layouts.begin_op(&from) {
+                prompt.error = Some("Wait for the current save to finish".into());
+                return;
+            }
+            match self.channels.ops.try_send(LayoutOp::Rename {
+                from: from.clone(),
+                to: name,
+            }) {
+                Ok(()) => {
+                    prompt.waiting = true;
+                    prompt.error = None;
+                }
+                Err(_) => {
+                    self.layouts.end_op(&from);
+                    prompt.error = Some("The layout worker is busy or stopped; try again".into());
+                }
+            }
+            return;
+        }
         if self.layouts.exists(&name) {
             prompt.error = Some(format!("A layout named “{name}” already exists"));
             return;
@@ -494,6 +704,7 @@ impl App {
                 tree: Panel::Empty {},
                 purpose: SavePurpose::New,
             },
+            PromptKind::Rename => unreachable!("handled above"),
         };
         match self.channels.saves.try_send(job) {
             Ok(()) => {
@@ -540,12 +751,25 @@ impl App {
             Action::Revert => self.layouts.revert(),
             Action::Refresh => self.scheduler.refresh_all(),
             Action::Prompt(kind) => {
+                let text = match (kind, self.layouts.active_key()) {
+                    (PromptKind::Rename, LayoutKey::Saved(name)) => name.clone(),
+                    _ => String::new(),
+                };
                 self.prompt = Some(NamePrompt {
                     kind,
-                    text: String::new(),
+                    text,
                     error: None,
                     waiting: false,
                 })
+            }
+            Action::ConfirmDelete => {
+                if let LayoutKey::Saved(name) = self.layouts.active_key() {
+                    self.delete_prompt = Some(DeletePrompt {
+                        name: name.clone(),
+                        error: None,
+                        waiting: false,
+                    });
+                }
             }
         }
     }
@@ -600,7 +824,24 @@ impl App {
                 self.pending_saves += 1;
             }
         }
+        self.remember_active();
         open
+    }
+
+    /// Record the active layout as the startup preference when it changes:
+    /// on switching, Save as, New layout, rename, or deleting the active one.
+    fn remember_active(&mut self) {
+        if !self.layouts.loaded() || self.remembered.as_ref() == Some(self.layouts.active_key()) {
+            return;
+        }
+        let key = self.layouts.active_key().clone();
+        let name = match &key {
+            LayoutKey::Saved(name) => Some(name.clone()),
+            LayoutKey::Unsaved => None,
+        };
+        // Not retried: at worst the next startup opens a different layout.
+        let _ = self.channels.ops.try_send(LayoutOp::Remember { name });
+        self.remembered = Some(key);
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
@@ -640,6 +881,7 @@ impl App {
             self.close_window(ui);
         } else {
             self.prompt_window(ui);
+            self.delete_window(ui);
             for action in actions {
                 self.apply(action);
             }
@@ -715,6 +957,22 @@ impl App {
             {
                 actions.push(Action::Prompt(PromptKind::New));
             }
+            if matches!(self.layouts.active_key(), LayoutKey::Saved(_)) {
+                if ui
+                    .small_button("Rename…")
+                    .on_hover_text("Rename this layout")
+                    .clicked()
+                {
+                    actions.push(Action::Prompt(PromptKind::Rename));
+                }
+                if ui
+                    .small_button("Delete…")
+                    .on_hover_text("Delete this saved layout")
+                    .clicked()
+                {
+                    actions.push(Action::ConfirmDelete);
+                }
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled(!self.scheduler.busy(), egui::Button::new("Refresh"))
@@ -762,6 +1020,7 @@ impl App {
         let title = match prompt.kind {
             PromptKind::SaveAs => "Save layout as",
             PromptKind::New => "New layout",
+            PromptKind::Rename => "Rename layout",
         };
         let mut submit = false;
         let mut cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
@@ -802,6 +1061,40 @@ impl App {
         }
     }
 
+    /// Confirms deleting a saved layout. Escape cancels.
+    fn delete_window(&mut self, ui: &mut egui::Ui) {
+        let Some(prompt) = &self.delete_prompt else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        egui::Window::new("Delete layout")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ui.ctx(), |ui| {
+                ui.label(format!("Delete the layout “{}”?", prompt.name));
+                ui.weak("Feeds and boards are not affected.");
+                if let Some(error) = &prompt.error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+                ui.horizontal(|ui| {
+                    if prompt.waiting {
+                        ui.spinner();
+                        ui.label("Deleting…");
+                    } else {
+                        confirm |= ui.button("Delete").clicked();
+                        cancel |= ui.button("Cancel").clicked();
+                    }
+                });
+            });
+        if cancel && !prompt.waiting {
+            self.delete_prompt = None;
+        } else if confirm {
+            self.confirm_delete();
+        }
+    }
+
     fn sidebar(
         &self,
         ui: &mut egui::Ui,
@@ -814,18 +1107,22 @@ impl App {
         let has_focus = focused.is_some();
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.menu_button("Add panel…", |ui| {
-                let choices = self
-                    .cache
-                    .feeds
-                    .iter()
-                    .map(|f| (Target::Feed(f.name.clone()), format!("Feed: {}", f.title)))
-                    .chain(
-                        self.cache
-                            .boards
-                            .iter()
-                            .map(|b| (Target::Board(b.id), format!("Board: {}", b.name))),
-                    )
-                    .chain([(Target::Archive, "Deleted-board archive".to_owned())]);
+                let choices =
+                    self.cache
+                        .feeds
+                        .iter()
+                        .map(|f| {
+                            (
+                                Target::Feed(f.info.name.clone()),
+                                format!("Feed: {}", f.info.title),
+                            )
+                        })
+                        .chain(
+                            self.cache.boards.iter().map(|b| {
+                                (Target::Board(b.info.id), format!("Board: {}", b.info.name))
+                            }),
+                        )
+                        .chain([(Target::Archive, "Deleted-board archive".to_owned())]);
                 for (target, title) in choices {
                     ui.push_id(&target, |ui| {
                         ui.menu_button(title, |ui| {
@@ -854,7 +1151,7 @@ impl App {
             } else if self.cache.feeds.is_empty() {
                 ui.weak("No feeds yet");
             }
-            for feed in &self.cache.feeds {
+            for feed in self.cache.feeds.iter().map(|f| &f.info) {
                 let target = Target::Feed(feed.name.clone());
                 self.entry(ui, &target, placed, &focused, has_focus, actions, |ui| {
                     ui.label(format!("Feed name: {}", feed.name));
@@ -875,7 +1172,7 @@ impl App {
             if self.cache.lists_loaded() && self.cache.boards.is_empty() {
                 ui.weak("No boards yet");
             }
-            for board in &self.cache.boards {
+            for board in self.cache.boards.iter().map(|b| &b.info) {
                 let target = Target::Board(board.id);
                 self.entry(ui, &target, placed, &focused, has_focus, actions, |ui| {
                     ui.label(format!("Board ID {}", board.id));
@@ -897,7 +1194,6 @@ impl App {
             ui.weak(
                 "Click to show. Use Add panel… for a new tab or split, or right-click an entry.",
             );
-            ui.weak("Counts appear for placed feeds and boards.");
         });
     }
 
@@ -1004,6 +1300,8 @@ pub(crate) struct TestEnds {
     pub signals: mpsc::SyncSender<Signal>,
     pub saves: mpsc::Receiver<SaveJob>,
     pub saved: mpsc::SyncSender<SaveDone>,
+    pub ops: mpsc::Receiver<LayoutOp>,
+    pub ops_done: mpsc::SyncSender<OpDone>,
 }
 
 #[cfg(test)]
@@ -1014,6 +1312,8 @@ impl App {
         let (signal_tx, signals) = mpsc::sync_channel(16);
         let (saves, save_jobs) = mpsc::sync_channel(8);
         let (save_done, saved) = mpsc::sync_channel(8);
+        let (ops, op_jobs) = mpsc::sync_channel(8);
+        let (op_done, ops_done) = mpsc::sync_channel(8);
         // No stream in tests: fetch at once instead of waiting for it.
         signal_tx
             .send(Signal::Disconnected(Some("no stream in tests".into())))
@@ -1027,6 +1327,8 @@ impl App {
                 signals,
                 saves,
                 saved,
+                ops,
+                ops_done,
             },
         );
         let ends = TestEnds {
@@ -1035,6 +1337,8 @@ impl App {
             signals: signal_tx,
             saves: save_jobs,
             saved: save_done,
+            ops: op_jobs,
+            ops_done: op_done,
         };
         (app, ends)
     }
@@ -1166,18 +1470,22 @@ impl Panes<'_> {
             .selected_text("Show…")
             .show_ui(ui, |ui| {
                 // Prefixed: a feed and a board may share a title.
-                let choices = self
-                    .cache
-                    .feeds
-                    .iter()
-                    .map(|f| (Target::Feed(f.name.clone()), format!("Feed: {}", f.title)))
-                    .chain(
-                        self.cache
-                            .boards
-                            .iter()
-                            .map(|b| (Target::Board(b.id), format!("Board: {}", b.name))),
-                    )
-                    .chain([(Target::Archive, "Deleted-board archive".to_string())]);
+                let choices =
+                    self.cache
+                        .feeds
+                        .iter()
+                        .map(|f| {
+                            (
+                                Target::Feed(f.info.name.clone()),
+                                format!("Feed: {}", f.info.title),
+                            )
+                        })
+                        .chain(
+                            self.cache.boards.iter().map(|b| {
+                                (Target::Board(b.info.id), format!("Board: {}", b.info.name))
+                            }),
+                        )
+                        .chain([(Target::Archive, "Deleted-board archive".to_string())]);
                 for (target, title) in choices {
                     if ui.selectable_label(&target == current, title).clicked() {
                         chosen = Some(target);
@@ -1410,12 +1718,44 @@ mod tests {
 
     fn all_lists(lists: Lists) -> Vec<(List, Result<ListData, String>)> {
         vec![
-            (List::Feeds, Ok(ListData::Feeds(lists.feeds))),
-            (List::Boards, Ok(ListData::Boards(lists.boards))),
-            (List::Layouts, Ok(ListData::Layouts(lists.layouts))),
+            (
+                List::Feeds,
+                Ok(ListData::Feeds(
+                    lists.feeds.into_iter().map(feed_summary).collect(),
+                )),
+            ),
+            (
+                List::Boards,
+                Ok(ListData::Boards(
+                    lists.boards.into_iter().map(board_summary).collect(),
+                )),
+            ),
+            (List::Layouts, Ok(layouts(lists.layouts))),
         ]
     }
-    use callboard_core::{feed::Item, layout::NamedLayout};
+
+    fn feed_summary(info: FeedInfo) -> FeedSummary {
+        FeedSummary {
+            info,
+            item_count: 0,
+            snoozed_count: 0,
+            next_wake_at_ms: None,
+        }
+    }
+
+    fn board_summary(info: BoardInfo) -> BoardSummary {
+        BoardSummary {
+            info,
+            todo_count: 0,
+            open_todo_count: 0,
+            note_count: 0,
+        }
+    }
+
+    fn layouts(layouts: Vec<NamedLayout>) -> ListData {
+        ListData::Layouts(layouts, Default::default())
+    }
+    use callboard_core::{feed::Item, layout::NamedLayout, store::BoardInfo};
     use serde_json::json;
 
     struct Harness {
@@ -1487,7 +1827,7 @@ mod tests {
             }
             ends.responses
                 .send(Fetched {
-                    lists: vec![(backend::List::Layouts, Ok(ListData::Layouts(vec![old])))],
+                    lists: vec![(backend::List::Layouts, Ok(layouts(vec![old])))],
                     targets: vec![],
                 })
                 .unwrap();
@@ -1503,7 +1843,7 @@ mod tests {
                 .send(Fetched {
                     lists: vec![(
                         backend::List::Layouts,
-                        Ok(ListData::Layouts(vec![NamedLayout {
+                        Ok(layouts(vec![NamedLayout {
                             name: "Day".into(),
                             tree: Panel::Board { id: 3 },
                             updated_at_ms: 3,

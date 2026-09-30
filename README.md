@@ -5,7 +5,7 @@ A Linux per-user bulletin board for tool-submitted feeds, todos, and notes.
 
 The Linux service and CLI support feeds, boards, todos, and notes, backed by
 SQLite through SQLx. The API also provides layouts, promotion, feed view state,
-and change events. A desktop GUI (read-only apart from saving layouts) is available; MCP is not implemented
+and change events. A desktop GUI (read-only apart from managing layouts) is available; MCP is not implemented
 yet.
 
 ```sh
@@ -66,6 +66,8 @@ callboard feed promote reviews 'item-key' inbox
 callboard feed promote reviews 'item-key' inbox --kind note
 printf '%s' '{"tree":{"kind":"feed","name":"reviews"}}' | callboard layout save 'Review day'
 callboard layouts
+callboard layout rename 'Review day' 'Reviews'
+callboard layout rm 'Reviews'
 ```
 
 Pass literal item keys and layout names, including URLs, Unicode, and `%`;
@@ -74,7 +76,8 @@ milliseconds or null), `wake_on_update`, `position`, and `reset_order`. To clear
 both snooze conditions, send `{"snoozed_until_ms":null,"wake_on_update":false}`.
 Feed patch input is limited to 16 KiB. `layout save NAME` accepts a `{"tree":...}`
 object up to 64 KiB and replaces that layout atomically. `layouts` returns all
-saved trees. See DESIGN.md for the panel-tree schema. These commands support
+saved trees. `layout rename` never replaces an existing layout, and `layout rm`
+reports whether the layout existed. See DESIGN.md for the panel-tree schema. These commands support
 `--no-auto-start` and the same JSON output/error conventions as other commands.
 
 From a stable installed binary path, `callboard setup --print` previews the
@@ -153,8 +156,9 @@ placed). Use **Add panel…** in the sidebar to choose a resource and open a new
 tab, split right/below, or show it in the focused panel. The same choices are
 available by right-clicking a resource. Drag tabs to rearrange, use **Show…** in a tab bar to retarget the
 active panel, and close panels from their tab. The sidebar lists saved layouts, feeds
-with error/stale markers, and boards; item counts appear for placed resources.
-The GUI opens the first saved layout by name. Panels whose feed or board was
+with error/stale markers, and boards, each with its item count (visible and
+snoozed for feeds). The GUI opens the layout that was active when it last ran,
+or else the first saved layout by name. Panels whose feed or board was
 deleted stay in place as placeholders.
 
 The GUI subscribes to `GET /events` and refetches only what changed, handling
@@ -170,10 +174,12 @@ one-second pause (`PUT /layouts/{name}`); the layout bar shows saving, saved,
 or a failed save that is retried. Closing the window flushes pending named-layout
 changes and waits for confirmation; if saving fails, you can retry, keep the
 window open, or explicitly close without waiting. **Save as…** stores the current arrangement
-under a new name and **New layout…** creates an empty one; without any saved
+under a new name and **New layout…** creates an empty one. **Rename…** and
+**Delete…** act on the active saved layout; deleting it switches to the next
+saved layout. Without any saved
 layout the window starts in an unnamed "Unsaved" arrangement. The
 deleted-board archive can be shown but is not stored in layouts. Saving
-layouts is the GUI's only write: feeds, boards, todos, and notes are
+and managing layouts are the GUI's only writes: feeds, boards, todos, and notes are
 read-only, and editing is subsequent work. Graphics dependencies are confined to the GUI
 crate; building `callboard` alone does not build eframe. A Wayland or X11 desktop
 with OpenGL support is required to launch the window.

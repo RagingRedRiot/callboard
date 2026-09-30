@@ -38,7 +38,17 @@ pub enum Kind {
 #[derive(Subcommand)]
 pub enum LayoutCommand {
     /// Create or replace a named layout with a {"tree": ...} object from stdin.
-    Save { name: String },
+    Save {
+        name: String,
+    },
+    /// Rename a layout; an existing layout with the new name is never replaced.
+    Rename {
+        name: String,
+        new_name: String,
+    },
+    Rm {
+        name: String,
+    },
 }
 
 // Encode UTF-8 bytes exactly once. Callers supply literal names and keys.
@@ -136,6 +146,23 @@ pub async fn layout(command: LayoutCommand) -> Result<Request, Error> {
                 method: "PUT",
                 resource: format!("/layouts/{}", segment(&name)),
                 body,
+            })
+        }
+        LayoutCommand::Rename { name, new_name } => {
+            validate_name(&name)?;
+            validate_name(&new_name)?;
+            Ok(Request {
+                method: "PATCH",
+                resource: format!("/layouts/{}", segment(&name)),
+                body: serde_json::to_vec(&serde_json::json!({"name":new_name}))?,
+            })
+        }
+        LayoutCommand::Rm { name } => {
+            validate_name(&name)?;
+            Ok(Request {
+                method: "DELETE",
+                resource: format!("/layouts/{}", segment(&name)),
+                body: vec![],
             })
         }
     }

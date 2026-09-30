@@ -503,6 +503,8 @@ struct SaveState {
     last_panel: Option<Panel>,
     changed_at: Option<Instant>,
     in_flight: bool,
+    /// A rename or delete is in flight; saving now could recreate the old name.
+    locked: bool,
     error: Option<String>,
     retry_at: Option<Instant>,
 }
@@ -556,6 +558,8 @@ pub struct Layouts {
     working: BTreeMap<LayoutKey, Working>,
     active: LayoutKey,
     loaded: bool,
+    /// The layout to open on first load, from the startup preference.
+    preferred: Option<String>,
     /// Bumped per rebuilt tree. Tile IDs restart for each tree, so a fresh
     /// tree ID keeps per-panel UI state (scroll, toggles) from leaking.
     generation: u64,
@@ -584,6 +588,7 @@ impl Layouts {
             working: BTreeMap::new(),
             active: LayoutKey::Unsaved,
             loaded: false,
+            preferred: None,
             generation: 0,
         };
         let unsaved = layouts.build(&LayoutKey::Unsaved, &Panel::Empty {});
@@ -622,6 +627,70 @@ impl Layouts {
             .workspace
     }
 
+    /// Whether the service's layout list has been applied.
+    pub fn loaded(&self) -> bool {
+        self.loaded
+    }
+
+    /// Open `name` on first load instead of the first layout by name.
+    pub fn prefer(&mut self, name: Option<String>) {
+        self.preferred = name;
+    }
+
+    /// Hold auto-saves of `name` while a rename or delete is in flight.
+    /// Refused while a save of it is in flight: the service would apply the
+    /// two in either order.
+    pub fn begin_op(&mut self, name: &str) -> bool {
+        match self.working.get_mut(&LayoutKey::Saved(name.to_owned())) {
+            Some(working) if working.save.in_flight => false,
+            Some(working) => {
+                working.save.locked = true;
+                true
+            }
+            None => true,
+        }
+    }
+
+    /// The rename or delete of `name` failed; resume auto-saving.
+    pub fn end_op(&mut self, name: &str) {
+        if let Some(working) = self.working.get_mut(&LayoutKey::Saved(name.to_owned())) {
+            working.save.locked = false;
+        }
+    }
+
+    /// The service renamed `from`. The working copy keeps its arrangement,
+    /// and any unsaved changes then save under the new name.
+    pub fn renamed(&mut self, from: &str, layout: &NamedLayout) {
+        let old = LayoutKey::Saved(from.to_owned());
+        let new = LayoutKey::Saved(layout.name.clone());
+        self.saved.remove(from);
+        self.saved.insert(layout.name.clone(), layout.tree.clone());
+        if let Some(mut working) = self.working.remove(&old) {
+            working.save.locked = false;
+            self.working.insert(new.clone(), working);
+        }
+        if self.active == old {
+            self.active = new;
+        }
+    }
+
+    /// The service deleted `name`. If it was active, open the first saved
+    /// layout, or the Unsaved arrangement when none remain.
+    pub fn deleted(&mut self, name: &str) {
+        let key = LayoutKey::Saved(name.to_owned());
+        self.saved.remove(name);
+        self.working.remove(&key);
+        if self.active == key {
+            let next = self
+                .saved
+                .keys()
+                .next()
+                .cloned()
+                .map_or(LayoutKey::Unsaved, LayoutKey::Saved);
+            self.switch(next);
+        }
+    }
+
     /// Whether `name` is taken, saved or not yet listed.
     pub fn exists(&self, name: &str) -> bool {
         self.saved.contains_key(name)
@@ -657,11 +726,17 @@ impl Layouts {
                 self.working.get_mut(&key).expect("present").outdated = true;
             }
         }
-        // Start in the first saved layout unless the user already arranged panels.
+        // Start in the preferred (else first) saved layout unless the user
+        // already arranged panels.
         if !self.loaded {
             self.loaded = true;
             let untouched = self.active == LayoutKey::Unsaved && self.active().tree.is_empty();
-            if untouched && let Some(name) = self.saved.keys().next().cloned() {
+            let start = self
+                .preferred
+                .take()
+                .filter(|name| self.saved.contains_key(name))
+                .or_else(|| self.saved.keys().next().cloned());
+            if untouched && let Some(name) = start {
                 self.switch(LayoutKey::Saved(name));
             }
         }
@@ -684,7 +759,7 @@ impl Layouts {
             let LayoutKey::Saved(name) = key else {
                 continue;
             };
-            if working.save.in_flight {
+            if working.save.in_flight || working.save.locked {
                 continue;
             }
             let panel = working.workspace.panel();
@@ -720,7 +795,7 @@ impl Layouts {
     pub fn next_save_deadline(&self, now: Instant) -> Option<Duration> {
         self.working
             .values()
-            .filter(|w| !w.save.in_flight)
+            .filter(|w| !w.save.in_flight && !w.save.locked)
             .filter_map(|w| {
                 let changed = w.save.changed_at? + SAVE_DELAY;
                 Some(w.save.retry_at.map_or(changed, |r| r.max(changed)))
@@ -1183,6 +1258,88 @@ mod tests {
         layouts.adopt(None, "Blank", &Panel::Empty {});
         assert_eq!(layouts.active_key(), &LayoutKey::Saved("Blank".into()));
         assert!(layouts.active().tree.is_empty());
+    }
+
+    #[test]
+    fn the_preferred_layout_opens_first_unless_it_is_gone() {
+        let list = [
+            named("Day", json!({"kind":"feed","name":"a"})),
+            named("Ops", json!({"kind":"board","id":2})),
+        ];
+        let mut layouts = Layouts::new();
+        layouts.prefer(Some("Ops".into()));
+        layouts.sync_saved(&list);
+        assert_eq!(layouts.active_key(), &LayoutKey::Saved("Ops".into()));
+        // Only the first load follows the preference.
+        layouts.switch(LayoutKey::Saved("Day".into()));
+        layouts.sync_saved(&list);
+        assert_eq!(layouts.active_key(), &LayoutKey::Saved("Day".into()));
+
+        let mut layouts = Layouts::new();
+        layouts.prefer(Some("Missing".into()));
+        layouts.sync_saved(&list);
+        assert_eq!(layouts.active_key(), &LayoutKey::Saved("Day".into()));
+    }
+
+    #[test]
+    fn renaming_moves_the_working_copy_and_holds_saves_until_done() {
+        let mut layouts = Layouts::new();
+        layouts.sync_saved(&[
+            named("Day", json!({"kind":"feed","name":"a"})),
+            named("Ops", json!({"kind":"board","id":2})),
+        ]);
+        let t0 = Instant::now();
+        layouts.active_mut().open(feed("b"), Placement::Right);
+        assert!(layouts.due_saves(t0).is_empty());
+        assert!(layouts.begin_op("Day"));
+        assert!(
+            layouts.due_saves(t0 + SAVE_DELAY).is_empty(),
+            "a save under the old name could recreate it"
+        );
+        assert_eq!(layouts.next_save_deadline(t0), None);
+        let arranged = layouts.active().panel();
+        layouts.renamed("Day", &named("Morning", json!({"kind":"feed","name":"a"})));
+        assert_eq!(layouts.active_key(), &LayoutKey::Saved("Morning".into()));
+        assert_eq!(layouts.active().panel(), arranged, "arrangement kept");
+        assert!(!layouts.exists("Day") && layouts.exists("Morning"));
+        // The pending change now saves under the new name.
+        let due = layouts.due_saves(t0 + SAVE_DELAY);
+        assert_eq!(due, vec![("Morning".to_owned(), arranged.clone())]);
+        assert!(!layouts.begin_op("Morning"), "refused while saving");
+        layouts.save_finished("Morning", Ok(arranged), t0 + SAVE_DELAY);
+        assert!(layouts.begin_op("Morning"));
+        layouts.end_op("Morning");
+        layouts.active_mut().open(feed("c"), Placement::Right);
+        assert!(layouts.due_saves(t0 + SAVE_DELAY * 2).is_empty());
+        assert_eq!(layouts.due_saves(t0 + SAVE_DELAY * 3).len(), 1, "resumed");
+    }
+
+    #[test]
+    fn deleting_the_active_layout_opens_another_or_unsaved() {
+        let mut layouts = Layouts::new();
+        layouts.sync_saved(&[
+            named("Day", json!({"kind":"feed","name":"a"})),
+            named("Ops", json!({"kind":"board","id":2})),
+        ]);
+        layouts.active_mut().open(feed("b"), Placement::Right);
+        assert!(layouts.begin_op("Day"));
+        layouts.deleted("Day");
+        assert_eq!(layouts.active_key(), &LayoutKey::Saved("Ops".into()));
+        assert!(!layouts.exists("Day"));
+        assert!(
+            layouts
+                .due_saves(Instant::now() + SAVE_DELAY * 2)
+                .is_empty(),
+            "the deleted layout's pending change is dropped"
+        );
+        // Deleting an inactive layout leaves the active one alone.
+        layouts.switch(LayoutKey::Unsaved);
+        layouts.deleted("Ops");
+        assert_eq!(layouts.active_key(), &LayoutKey::Unsaved);
+        layouts.adopt(None, "Last", &Panel::Empty {});
+        layouts.deleted("Last");
+        assert_eq!(layouts.active_key(), &LayoutKey::Unsaved);
+        assert_eq!(layouts.entries().len(), 1);
     }
 
     #[test]

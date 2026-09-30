@@ -923,6 +923,128 @@ async fn layout_api_saves_replaces_and_rejects_invalid_requests_atomically() {
 }
 
 #[tokio::test]
+async fn layout_rename_delete_preferences_and_list_counts() {
+    let f = Fixture::new();
+    let mut service = f.command().arg("serve").spawn().unwrap();
+    f.wait_ready().await;
+    let empty = json!({"tree":{"kind":"empty"}});
+    assert_eq!(f.api("PUT", "/layouts/Day", empty.clone()).await.0, 200);
+    assert_eq!(f.api("PUT", "/layouts/Night", empty.clone()).await.0, 200);
+    assert_eq!(
+        f.api("GET", "/preferences", json!(null)).await,
+        (200, json!({"last_layout":null}))
+    );
+    assert_eq!(
+        f.api("PATCH", "/preferences", json!({"last_layout":"Missing"}))
+            .await
+            .0,
+        404
+    );
+    assert_eq!(
+        f.api("PATCH", "/preferences", json!({"typo":1})).await.0,
+        400
+    );
+    assert_eq!(f.api("PUT", "/preferences", json!({})).await.0, 405);
+    assert_eq!(
+        f.api("PATCH", "/preferences", json!({"last_layout":"Day"}))
+            .await,
+        (200, json!({"last_layout":"Day"}))
+    );
+
+    let path = "/layouts/Work%20%2F%20day";
+    assert_eq!(
+        f.api("PATCH", "/layouts/Day", json!({"name":"Night"}))
+            .await
+            .0,
+        409
+    );
+    assert_eq!(
+        f.api("PATCH", "/layouts/Missing", json!({"name":"x"}))
+            .await
+            .0,
+        404
+    );
+    for invalid in [
+        json!({}),
+        json!({"name":" x"}),
+        json!({"name":"x","typo":1}),
+    ] {
+        assert_eq!(f.api("PATCH", "/layouts/Day", invalid).await.0, 400);
+    }
+    let (status, renamed) = f
+        .api("PATCH", "/layouts/Day", json!({"name":"Work / day"}))
+        .await;
+    assert_eq!(status, 200, "{renamed}");
+    assert_eq!(renamed["name"], "Work / day");
+    assert_eq!(renamed["tree"], empty["tree"]);
+    assert_eq!(
+        f.api("GET", "/preferences", json!(null)).await.1,
+        json!({"last_layout":"Work / day"})
+    );
+    assert_eq!(
+        f.api("DELETE", path, json!(null)).await,
+        (200, json!({"deleted":true}))
+    );
+    assert_eq!(
+        f.api("DELETE", path, json!(null)).await,
+        (200, json!({"deleted":false}))
+    );
+    assert_eq!(
+        f.api("GET", "/preferences", json!(null)).await.1,
+        json!({"last_layout":null})
+    );
+    let names: Vec<Value> = f
+        .api("GET", "/layouts", json!(null))
+        .await
+        .1
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["name"].clone())
+        .collect();
+    assert_eq!(names, [json!("Night")]);
+
+    assert_eq!(
+        f.api(
+            "PUT",
+            "/feeds/work",
+            json!({"items":[{"key":"a","title":"A"},{"key":"b","title":"B"}]})
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        f.api(
+            "PATCH",
+            "/feeds/work/items/a",
+            json!({"snoozed_until_ms": 4_000_000_000_000_i64})
+        )
+        .await
+        .0,
+        200
+    );
+    let feeds = f.api("GET", "/feeds", json!(null)).await.1;
+    assert_eq!(feeds[0]["name"], "work");
+    assert_eq!(feeds[0]["item_count"], 2);
+    assert_eq!(feeds[0]["snoozed_count"], 1);
+    assert_eq!(feeds[0]["next_wake_at_ms"], 4_000_000_000_000_i64);
+    let (_, board) = f.api("POST", "/boards", json!({"name":"Work"})).await;
+    let id = board["id"].as_i64().unwrap();
+    f.api("POST", &format!("/boards/{id}/todos"), json!({"title":"T"}))
+        .await;
+    f.api("POST", &format!("/boards/{id}/notes"), json!({"body":"N"}))
+        .await;
+    let boards = f.api("GET", "/boards", json!(null)).await.1;
+    assert_eq!(
+        boards,
+        json!([{"id":id,"name":"Work","todo_count":1,"open_todo_count":1,"note_count":1}])
+    );
+    f.stop().await;
+    assert!(service.wait().await.unwrap().success());
+}
+
+#[tokio::test]
 async fn event_stream_delivers_committed_changes_and_reconnects_with_resync() {
     use http_body_util::{BodyExt, Full};
     use hyper::{Request, body::Bytes};
@@ -1243,6 +1365,20 @@ async fn feed_controls_promotion_and_layout_cli_roundtrip_literal_keys() {
             .success()
     );
     assert_eq!(json_output(&f.cli(&["layouts"], "").await), layouts);
+    let spare = f.cli(&["layout", "save", "Spare"], &layout).await;
+    assert!(spare.status.success());
+    let taken = f.cli(&["layout", "rename", name, "Spare"], "").await;
+    assert!(!taken.status.success());
+    assert!(String::from_utf8_lossy(&taken.stderr).contains("409"));
+    let evening = "Evening %/?";
+    let out = f.cli(&["layout", "rename", name, evening], "").await;
+    assert!(out.status.success());
+    assert_eq!(json_output(&out)["name"], evening);
+    let out = f.cli(&["layout", "rm", evening], "").await;
+    assert_eq!(json_output(&out), json!({"deleted":true}));
+    let out = f.cli(&["layout", "rm", "Spare"], "").await;
+    assert_eq!(json_output(&out), json!({"deleted":true}));
+    assert_eq!(json_output(&f.cli(&["layouts"], "").await), json!([]));
     f.stop().await;
     assert!(
         !f.cli(&["--no-auto-start", "layouts"], "")
@@ -1288,6 +1424,9 @@ async fn invalid_view_cli_input_never_starts_service() {
             String::new(),
         ),
         (vec!["layout", "save", " bad"], String::new()),
+        (vec!["layout", "rename", "Day", " bad"], String::new()),
+        (vec!["layout", "rename", "", "Day"], String::new()),
+        (vec!["layout", "rm", "bad\n"], String::new()),
         (vec!["layout", "save", "Day"], "{}".to_owned()),
         (
             vec!["layout", "save", "Day"],

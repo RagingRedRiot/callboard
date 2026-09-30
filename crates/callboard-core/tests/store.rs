@@ -64,7 +64,7 @@ async fn migrations_wal_and_data_survive_reopening() {
             .fetch_one(&mut conn)
             .await
             .unwrap(),
-        5
+        6
     );
     conn.close().await.unwrap();
     reopened.close().await;
@@ -776,4 +776,99 @@ async fn readers_never_mix_metadata_and_items_from_different_snapshots() {
     };
     tokio::join!(writer, reader);
     store.close().await;
+}
+
+#[tokio::test]
+async fn list_summaries_count_items_snoozes_and_active_board_contents() {
+    let (_dir, store) = setup().await;
+    store
+        .submit(
+            "work",
+            &snapshot(json!([
+                {"key":"a","title":"A"}, {"key":"b","title":"B"},
+                {"key":"c","title":"C"}, {"key":"d","title":"D"}
+            ])),
+        )
+        .await
+        .unwrap();
+    store.submit("empty", &snapshot(json!([]))).await.unwrap();
+    let snooze = |until: Value, on_update: Option<bool>| FeedItemPatch {
+        snoozed_until_ms: serde_json::from_value(until).unwrap(),
+        wake_on_update: on_update,
+        ..Default::default()
+    };
+    let later = i64::MAX - 1;
+    store
+        .patch_feed_item("work", "a", snooze(json!(i64::MAX), None))
+        .await
+        .unwrap();
+    store
+        .patch_feed_item("work", "b", snooze(json!(later), None))
+        .await
+        .unwrap();
+    store
+        .patch_feed_item("work", "c", snooze(Value::Null, Some(true)))
+        .await
+        .unwrap();
+    // An already-expired deadline counts as awake and sets no wake time.
+    store
+        .patch_feed_item("work", "d", snooze(json!(1), None))
+        .await
+        .unwrap();
+
+    let feeds = store.feed_summaries().await.unwrap();
+    assert_eq!(
+        feeds
+            .iter()
+            .map(|f| (
+                f.info.name.as_str(),
+                f.item_count,
+                f.snoozed_count,
+                f.next_wake_at_ms
+            ))
+            .collect::<Vec<_>>(),
+        [("empty", 0, 0, None), ("work", 4, 3, Some(later))]
+    );
+    let json = serde_json::to_value(&feeds[1]).unwrap();
+    assert_eq!(json["name"], "work", "summary flattens the feed metadata");
+    assert_eq!(json["snoozed_count"], 3);
+
+    let board = store.create_board("Work").await.unwrap();
+    let empty = store.create_board("Empty").await.unwrap();
+    let done = store
+        .add_todo(board.id, "Done", None, None, None)
+        .await
+        .unwrap();
+    store.set_todo_done(done.id, true).await.unwrap();
+    store
+        .add_todo(board.id, "Open", None, None, None)
+        .await
+        .unwrap();
+    let archived = store
+        .add_todo(board.id, "Archived", None, None, None)
+        .await
+        .unwrap();
+    store.archive_todo(archived.id).await.unwrap();
+    store
+        .add_note(board.id, None, "Kept", None, None)
+        .await
+        .unwrap();
+    let note = store
+        .add_note(board.id, None, "Gone", None, None)
+        .await
+        .unwrap();
+    store.archive_note(note.id).await.unwrap();
+
+    let boards = store.board_summaries().await.unwrap();
+    assert_eq!(
+        boards
+            .iter()
+            .map(|b| (b.info.id, b.todo_count, b.open_todo_count, b.note_count))
+            .collect::<Vec<_>>(),
+        [(empty.id, 0, 0, 0), (board.id, 2, 1, 1)]
+    );
+    assert_eq!(
+        boards.iter().map(|b| b.info.clone()).collect::<Vec<_>>(),
+        store.list_boards().await.unwrap()
+    );
 }

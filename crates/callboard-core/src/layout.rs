@@ -47,6 +47,20 @@ pub struct NamedLayout {
     pub updated_at_ms: i64,
 }
 
+/// `PATCH /layouts/{name}` body.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayoutRename {
+    pub name: String,
+}
+
+/// Per-user preferences. `last_layout` names an existing layout or is null.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Preferences {
+    pub last_layout: Option<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("invalid layout: {0}")]
 pub struct LayoutError(pub &'static str);

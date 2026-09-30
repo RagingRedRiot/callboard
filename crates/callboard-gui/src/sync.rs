@@ -76,6 +76,8 @@ pub struct Scheduler {
     dirty: BTreeSet<Target>,
     /// Scheduled refetches: snooze expiry and failed-target retries.
     wake: BTreeMap<Target, Instant>,
+    /// Refetch the feed list when a snooze expires, which changes its counts.
+    feed_list_wake: Option<Instant>,
     next_poll: Instant,
     in_flight: Option<Request>,
 }
@@ -97,6 +99,7 @@ impl Scheduler {
             feeds_changed: BTreeSet::new(),
             dirty: BTreeSet::new(),
             wake: BTreeMap::new(),
+            feed_list_wake: None,
             next_poll: now,
             in_flight: None,
         }
@@ -223,6 +226,12 @@ impl Scheduler {
             .or_insert(at);
     }
 
+    /// Refetch the feed list at `at`, replacing any earlier schedule. Each
+    /// feed list names its own next snooze deadline.
+    pub fn wake_feed_list_at(&mut self, at: Option<Instant>) {
+        self.feed_list_wake = at;
+    }
+
     /// The next batch to fetch, given the targets currently open.
     /// `references(board, feed)` says whether an open board or archive
     /// references `feed`; it should answer true when unsure (not yet loaded).
@@ -254,6 +263,10 @@ impl Scheduler {
         for target in due {
             self.wake.remove(&target);
             self.dirty.insert(target);
+        }
+        if self.feed_list_wake.is_some_and(|at| at <= now) {
+            self.feed_list_wake = None;
+            self.dirty_lists.insert(List::Feeds);
         }
         self.wake.retain(|t, _| open.contains(t));
         if std::mem::take(&mut self.everything) {
@@ -314,6 +327,7 @@ impl Scheduler {
             return None;
         }
         let mut deadlines: Vec<Instant> = self.wake.values().copied().collect();
+        deadlines.extend(self.feed_list_wake);
         if !self.dirty_lists.is_empty()
             && let Some(retry) = self.lists_retry
         {
@@ -564,6 +578,35 @@ mod tests {
         assert_eq!(s.next_deadline(at), Some(last_full + MAX_STALE - at));
         let refetch = s.poll(last_full + MAX_STALE, &visible, any).unwrap();
         assert!(!refetch.lists.is_empty() && refetch.targets == vec![feed]);
+    }
+
+    #[test]
+    fn a_snooze_deadline_refetches_the_feed_list_for_its_counts() {
+        let t0 = Instant::now();
+        let mut s = live(t0);
+        let nothing = open(&[]);
+        s.poll(t0, &nothing, any).unwrap();
+        s.finished(t0, &ok());
+        let at = t0 + Duration::from_secs(30);
+        s.wake_feed_list_at(Some(t0 + Duration::from_secs(90)));
+        s.wake_feed_list_at(Some(at)); // Each feed list replaces the schedule.
+        assert_eq!(s.next_deadline(t0), Some(Duration::from_secs(30)));
+        assert!(
+            s.poll(at - Duration::from_millis(1), &nothing, any)
+                .is_none()
+        );
+        assert_eq!(
+            s.poll(at, &nothing, any).unwrap(),
+            Request {
+                lists: BTreeSet::from([List::Feeds]),
+                targets: vec![],
+            }
+        );
+        s.finished(at, &ok());
+        assert!(
+            s.poll(at + Duration::from_secs(60), &nothing, any)
+                .is_none()
+        );
     }
 
     #[test]

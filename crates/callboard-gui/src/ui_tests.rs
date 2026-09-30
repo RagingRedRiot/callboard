@@ -1,14 +1,14 @@
 //! Interaction tests: drive the real window code through egui's accessibility
 //! tree (clicks, right-clicks, typing, tab drags) with a fake service.
 use crate::{
-    app::{App, SaveDone, SavePurpose, TestEnds},
+    app::{App, LayoutOp, OpDone, SaveDone, SavePurpose, TestEnds},
     backend::{Contents, Fetched, List, ListData, Request, Target},
     workspace::{LayoutKey, SAVE_DELAY},
 };
 use callboard_core::{
     feed::Item,
-    layout::{Axis, NamedLayout, Panel},
-    store::{BoardContents, BoardInfo, Feed, FeedInfo},
+    layout::{Axis, NamedLayout, Panel, Preferences},
+    store::{BoardContents, BoardInfo, BoardSummary, Feed, FeedInfo, FeedSummary},
 };
 use eframe::egui;
 use egui_kittest::{Harness, kittest::Queryable};
@@ -34,22 +34,55 @@ fn layout(name: &str, tree: serde_json::Value) -> NamedLayout {
     }
 }
 
-/// Answer a fetch the way the service would for the seeded data.
-fn answer(request: Request) -> Fetched {
+/// The fake service's layout state, which tests change as the service would.
+#[derive(Clone)]
+struct Saved {
+    layouts: Vec<NamedLayout>,
+    preferences: Preferences,
+}
+
+impl Default for Saved {
+    fn default() -> Self {
+        Self {
+            layouts: vec![
+                layout("Day", json!({"kind":"feed","name":"a"})),
+                layout("Ops", json!({"kind":"board","id":2})),
+            ],
+            preferences: Preferences::default(),
+        }
+    }
+}
+
+/// Answer a fetch the way the service would for the seeded data. Feed "a" has
+/// one item; "b" has seven, two snoozed. Inbox has one todo and two notes.
+fn answer(request: Request, saved: &Saved) -> Fetched {
     let lists = request
         .lists
         .iter()
         .map(|list| {
             let data = match list {
-                List::Feeds => ListData::Feeds(vec![feed_info("a"), feed_info("b")]),
-                List::Boards => ListData::Boards(vec![BoardInfo {
-                    id: 2,
-                    name: "Inbox".into(),
+                List::Feeds => ListData::Feeds(
+                    [("a", 1, 0), ("b", 7, 2)]
+                        .map(|(name, items, snoozed)| FeedSummary {
+                            info: feed_info(name),
+                            item_count: items,
+                            snoozed_count: snoozed,
+                            next_wake_at_ms: None,
+                        })
+                        .into(),
+                ),
+                List::Boards => ListData::Boards(vec![BoardSummary {
+                    info: BoardInfo {
+                        id: 2,
+                        name: "Inbox".into(),
+                    },
+                    todo_count: 1,
+                    open_todo_count: 1,
+                    note_count: 2,
                 }]),
-                List::Layouts => ListData::Layouts(vec![
-                    layout("Day", json!({"kind":"feed","name":"a"})),
-                    layout("Ops", json!({"kind":"board","id":2})),
-                ]),
+                List::Layouts => {
+                    ListData::Layouts(saved.layouts.clone(), saved.preferences.clone())
+                }
             };
             (*list, Ok(data))
         })
@@ -86,16 +119,25 @@ fn answer(request: Request) -> Fetched {
 struct Ui {
     harness: Harness<'static, App>,
     ends: TestEnds,
+    saved: Saved,
 }
 
 impl Ui {
     /// A window on the seeded service, with its first loads answered.
     fn new() -> Self {
+        Self::with(Saved::default())
+    }
+
+    fn with(saved: Saved) -> Self {
         let (app, ends) = App::for_tests();
         let harness = Harness::builder()
             .with_size([1200.0, 760.0])
             .build_ui_state(|ui, app: &mut App| app.show(ui), app);
-        let mut ui = Self { harness, ends };
+        let mut ui = Self {
+            harness,
+            ends,
+            saved,
+        };
         ui.settle();
         ui
     }
@@ -105,9 +147,25 @@ impl Ui {
         for _ in 0..8 {
             self.harness.step();
             if let Ok(request) = self.ends.requests.try_recv() {
-                self.ends.responses.send(answer(request)).unwrap();
+                self.ends
+                    .responses
+                    .send(answer(request, &self.saved))
+                    .unwrap();
             }
         }
+    }
+
+    /// Layout operations sent so far, oldest first.
+    fn ops(&self) -> Vec<LayoutOp> {
+        self.ends.ops.try_iter().collect()
+    }
+
+    fn clear_field(&mut self, label: &str) {
+        self.harness.get_by_label(label).focus();
+        self.harness
+            .key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        self.harness.key_press(egui::Key::Backspace);
+        self.harness.step();
     }
 
     fn app(&self) -> &App {
@@ -379,4 +437,162 @@ fn save_as_names_the_arrangement_and_switches_to_it() {
         ui.harness.query_by_label("Layout name").is_none(),
         "dialog closed"
     );
+}
+
+fn remember(name: Option<&str>) -> LayoutOp {
+    LayoutOp::Remember {
+        name: name.map(str::to_owned),
+    }
+}
+
+#[test]
+fn unplaced_sidebar_entries_show_counts_from_the_lists() {
+    let ui = Ui::new();
+    // Feed "b" is not placed: 7 items, 2 snoozed. Inbox: 1 todo + 2 notes.
+    ui.harness.get_by_label("5");
+    ui.harness.get_by_label("+2 snoozed");
+    ui.harness.get_by_label("3");
+}
+
+#[test]
+fn startup_opens_the_preferred_layout_and_switching_remembers_it() {
+    let mut ui = Ui::with(Saved {
+        preferences: Preferences {
+            last_layout: Some("Ops".into()),
+        },
+        ..Saved::default()
+    });
+    assert_eq!(
+        ui.app().layouts.active_key(),
+        &LayoutKey::Saved("Ops".into())
+    );
+    assert!(ui.ops().is_empty(), "already the preference");
+    ui.harness.get_by_label("Day").click();
+    ui.settle();
+    assert_eq!(ui.ops(), [remember(Some("Day"))]);
+    ui.harness.get_by_label("Unsaved (not saved)").click();
+    ui.settle();
+    assert_eq!(ui.ops(), [remember(None)]);
+}
+
+#[test]
+fn without_a_preference_the_first_layout_opens_and_is_remembered() {
+    let ui = Ui::new();
+    assert_eq!(
+        ui.app().layouts.active_key(),
+        &LayoutKey::Saved("Day".into())
+    );
+    assert_eq!(ui.ops(), [remember(Some("Day"))]);
+}
+
+#[test]
+fn rename_refuses_taken_names_then_renames_the_active_layout() {
+    let mut ui = Ui::new();
+    ui.ops();
+    ui.harness.get_by_label("Rename…").click();
+    ui.settle();
+    ui.harness.get_by_label("Rename layout");
+    assert_eq!(
+        ui.harness.get_by_label("Layout name").value().as_deref(),
+        Some("Day"),
+        "prefilled with the current name"
+    );
+    ui.clear_field("Layout name");
+    ui.harness.get_by_label("Layout name").type_text("Ops");
+    ui.harness.get_by_label("Save").click();
+    ui.settle();
+    ui.harness.get_by_label_contains("already exists");
+    assert!(ui.ops().is_empty());
+    ui.clear_field("Layout name");
+    ui.harness.get_by_label("Layout name").type_text("Morning");
+    ui.harness.get_by_label("Save").click();
+    ui.settle();
+    let op = LayoutOp::Rename {
+        from: "Day".into(),
+        to: "Morning".into(),
+    };
+    assert_eq!(ui.ops(), std::slice::from_ref(&op));
+    ui.harness.get_by_label("Saving…");
+    // The service refuses (another window took the name meanwhile).
+    ui.ends
+        .ops_done
+        .send(OpDone {
+            op: op.clone(),
+            result: Err("HTTP 409 Conflict: layout name is already in use".into()),
+        })
+        .unwrap();
+    ui.settle();
+    ui.harness.get_by_label_contains("already in use");
+    assert_eq!(
+        ui.app().layouts.active_key(),
+        &LayoutKey::Saved("Day".into())
+    );
+    // Retry succeeds.
+    ui.harness.get_by_label("Save").click();
+    ui.settle();
+    assert_eq!(ui.ops(), std::slice::from_ref(&op));
+    let renamed = layout("Morning", json!({"kind":"feed","name":"a"}));
+    ui.saved.layouts[0] = renamed.clone();
+    ui.saved.layouts.sort_by(|a, b| a.name.cmp(&b.name));
+    ui.ends
+        .ops_done
+        .send(OpDone {
+            op,
+            result: Ok(Some(renamed)),
+        })
+        .unwrap();
+    ui.settle();
+    assert_eq!(
+        ui.app().layouts.active_key(),
+        &LayoutKey::Saved("Morning".into())
+    );
+    assert!(ui.harness.query_by_label("Rename layout").is_none());
+    assert!(ui.harness.query_by_label("Day").is_none());
+    ui.harness.get_by_label("Layout: Morning");
+    assert_eq!(ui.ops(), [remember(Some("Morning"))]);
+}
+
+#[test]
+fn delete_asks_for_confirmation_then_opens_the_next_layout() {
+    let mut ui = Ui::new();
+    ui.ops();
+    ui.harness.get_by_label("Delete…").click();
+    ui.settle();
+    ui.harness.get_by_label("Delete the layout “Day”?");
+    ui.harness.get_by_label("Cancel").click();
+    ui.settle();
+    assert!(
+        ui.harness
+            .query_by_label("Delete the layout “Day”?")
+            .is_none()
+    );
+    assert!(ui.ops().is_empty());
+
+    ui.harness.get_by_label("Delete…").click();
+    ui.settle();
+    ui.harness.get_by_label("Delete").click();
+    ui.settle();
+    let op = LayoutOp::Delete { name: "Day".into() };
+    assert_eq!(ui.ops(), std::slice::from_ref(&op));
+    ui.harness.get_by_label("Deleting…");
+    ui.saved.layouts.remove(0);
+    ui.ends
+        .ops_done
+        .send(OpDone {
+            op,
+            result: Ok(None),
+        })
+        .unwrap();
+    ui.settle();
+    assert_eq!(
+        ui.app().layouts.active_key(),
+        &LayoutKey::Saved("Ops".into())
+    );
+    assert!(
+        ui.harness
+            .query_by_label("Delete the layout “Day”?")
+            .is_none()
+    );
+    assert!(ui.harness.query_by_label("Day").is_none());
+    assert_eq!(ui.ops(), [remember(Some("Ops"))]);
 }

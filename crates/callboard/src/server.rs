@@ -5,7 +5,9 @@ use crate::{
 };
 use callboard_core::{
     feed::{MAX_SNAPSHOT_BYTES, Snapshot, validate_feed_name},
-    store::{FeedItemPatch, NotePatch, SourceReference, Store, StoreError, TodoPatch},
+    store::{
+        FeedItemPatch, NotePatch, PreferencesPatch, SourceReference, Store, StoreError, TodoPatch,
+    },
 };
 use http_body_util::{BodyExt, Full, Limited, combinators::UnsyncBoxBody};
 use hyper::{
@@ -119,8 +121,11 @@ fn storage_error(e: StoreError) -> Reply {
         StoreError::FeedNotFound(_)
         | StoreError::FeedItemNotFound { .. }
         | StoreError::BoardNotFound(_)
-        | StoreError::BoardItemNotFound { .. } => error(StatusCode::NOT_FOUND, e),
-        StoreError::BoardNotEmpty(_) | StoreError::BoardNameTaken => error(StatusCode::CONFLICT, e),
+        | StoreError::BoardItemNotFound { .. }
+        | StoreError::LayoutNotFound(_) => error(StatusCode::NOT_FOUND, e),
+        StoreError::BoardNotEmpty(_)
+        | StoreError::BoardNameTaken
+        | StoreError::LayoutNameTaken(_) => error(StatusCode::CONFLICT, e),
         StoreError::InvalidPosition(_)
         | StoreError::RestoreBoardRequired
         | StoreError::InvalidPatch(_)
@@ -185,10 +190,54 @@ async fn handle(
                     Err(e) => storage_error(e),
                 }
             }
+            ["", "layouts", name] if method == Method::DELETE => {
+                let name = match decode_path_segment(name) {
+                    Ok(name) => name,
+                    Err(e) => return error(StatusCode::BAD_REQUEST, e),
+                };
+                match store.delete_layout(&name).await {
+                    Ok(deleted) => reply(StatusCode::OK, json!({"deleted":deleted})),
+                    Err(e) => storage_error(e),
+                }
+            }
+            ["", "layouts", name] if method == Method::PATCH => {
+                let name = match decode_path_segment(name) {
+                    Ok(name) => name,
+                    Err(e) => return error(StatusCode::BAD_REQUEST, e),
+                };
+                let rename =
+                    match request_json::<callboard_core::layout::LayoutRename>(request).await {
+                        Ok(rename) => rename,
+                        Err(e) => return e.reply(),
+                    };
+                match store.rename_layout(&name, &rename.name).await {
+                    Ok(layout) => reply(StatusCode::OK, layout),
+                    Err(e) => storage_error(e),
+                }
+            }
             ["", "layouts"] | ["", "layouts", _] => {
                 error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
             }
             _ => error(StatusCode::NOT_FOUND, "unknown resource"),
+        };
+    }
+    if parts.as_slice() == ["", "preferences"] {
+        return match method {
+            Method::GET => match store.preferences().await {
+                Ok(preferences) => reply(StatusCode::OK, preferences),
+                Err(e) => storage_error(e),
+            },
+            Method::PATCH => {
+                let patch = match request_json::<PreferencesPatch>(request).await {
+                    Ok(patch) => patch,
+                    Err(e) => return e.reply(),
+                };
+                match store.patch_preferences(patch).await {
+                    Ok(preferences) => reply(StatusCode::OK, preferences),
+                    Err(e) => storage_error(e),
+                }
+            }
+            _ => error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"),
         };
     }
     let route = match parts.as_slice() {
@@ -214,7 +263,7 @@ async fn handle(
         return reply(StatusCode::OK, json!({"service":"callboard", "api":1}));
     }
     if route == 1 {
-        return match store.list_feeds().await {
+        return match store.feed_summaries().await {
             Ok(v) => reply(StatusCode::OK, v),
             Err(e) => storage_error(e),
         };
@@ -427,7 +476,7 @@ async fn handle_board_api(request: Request<Incoming>, store: &Store, parts: &[&s
             Ok(contents) => reply(StatusCode::OK, contents),
             Err(e) => storage_error(e),
         },
-        ["", "boards"] if method == Method::GET => match store.list_boards().await {
+        ["", "boards"] if method == Method::GET => match store.board_summaries().await {
             Ok(v) => reply(StatusCode::OK, v),
             Err(e) => storage_error(e),
         },
