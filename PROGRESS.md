@@ -608,8 +608,11 @@ a matching service.
 - Full local workflow passed; the GUI suite (59 tests) was stable over three
   repeated runs. An X11 launch against an isolated seeded service ran without
   errors and opened the preferred layout "Day" rather than the first by name
-  ("Alpha"); a screenshot could not be taken under Wayland, so the menus were
-  not inspected visually.
+  ("Alpha"). A `cosmic-screenshot` capture (after approving the portal's
+  access dialog) showed Day open, Rename…/Delete… in the layout bar, sidebar
+  counts for unplaced feeds and boards ("alerts 1 +1 snoozed", "Inbox 2"),
+  and Snooze/Promote on each visible item. Menus were not opened by hand: no
+  Wayland input tool is installed, so interaction relies on the kittest tests.
 
 ## Suggested next
 
