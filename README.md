@@ -192,8 +192,19 @@ deleted-board archive can be shown but is not stored in layouts.
 Each feed item has **Snooze** (for an hour, four hours, a day, a week, or until
 its content changes) and **Promote** (to a board as a todo or note). Snoozed
 items appear under **Show snoozed** with **Unsnooze**. A failed action shows a
-dismissible message under the layout bar. Board items are not yet editable in
-the GUI. Graphics dependencies are confined to the GUI
+dismissible message under the layout bar.
+
+Board cards are editable (DESIGN.md §6.3). Type into **Add a todo** or **Add a
+note** and press Enter; tick a todo's checkbox to mark it done. Each item's
+**…** menu edits it in place (title, details, link, and a color for notes),
+moves it to another board, archives it, or deletes it after confirmation. Drag
+the dotted handle at an item's left to reorder it. **Show archived** lists
+archived items with **Restore**. The **Board** menu renames the board,
+archives its done todos, or deletes it (its items move to the deleted-board
+archive, whose card restores them to a chosen board). **New board…** in the
+sidebar creates a board and places its card.
+
+Graphics dependencies are confined to the GUI
 crate; building `callboard` alone does not build eframe. A Wayland or X11 desktop
 with OpenGL support is required to launch the window.
 See [PROGRESS.md](PROGRESS.md) for session scope and the next step.

@@ -264,9 +264,33 @@ snoozed.
 
 ### 6.3 Board cards
 
-A board card shows the board's todos and notes. Todos are a checklist; notes
-are sticky notes. Both reorder by dragging and accept drags from feed cards as
-promotion (§5.3).
+A board card shows the board's todos as a checklist and its notes as sticky
+notes, below the todos or beside them when the card is wide enough. Edits go
+to the service at once; the card refetches and shows what was stored.
+
+- **Add**: a field above each list. Enter adds a todo with that title, or a
+  note with that text, and keeps the field ready for the next one.
+- **Complete**: a todo's checkbox marks it done or not done. Done todos stay
+  until archived; **Archive done** in the board menu archives them together.
+- **Edit**: an item's **…** menu opens an editor in its place for the title,
+  body, and link, and for notes a color. Save (or Enter in a single-line
+  field) stores only the fields that changed; Cancel or Escape discards.
+- **Reorder** by dragging the handle at an item's left within its list.
+- **Move to** another board, **Archive**, or **Delete…** (permanent, after
+  confirmation) from the same menu.
+- **Show archived (n)** lists the board's archived items with **Restore** and
+  **Delete…**.
+- The **Board** menu renames the board, archives done todos, or deletes the
+  board. The confirmation says that its todos and notes, archived ones
+  included, move to the deleted-board archive. Deleting a board from the GUI
+  closes its card in the active layout.
+- **New board…** in the sidebar creates a board and places its card;
+  right-clicking a board entry offers rename and delete too.
+
+The deleted-board archive card lists its items with the board each came from,
+**Restore to** a chosen board, and **Delete…**.
+
+Dragging a feed item onto a board card promotes it (§5.3).
 
 ### 6.4 Layouts
 

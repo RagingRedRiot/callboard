@@ -1,8 +1,8 @@
 //! The desktop window: resource sidebar, layout bar, and canvas of cards.
-//! Writes manage layouts and snooze or promote feed items; boards and their
-//! items are not yet editable.
+//! Writes manage layouts, snooze or promote feed items, and edit boards.
 use crate::{
     backend::{self, Contents, Fetched, ListData, PromoteKind, Request, Target},
+    board::{self, BoardOp, Kind},
     events::{self, Signal},
     sync::{Link, Outcome, POLL_INTERVAL, Scheduler},
     workspace::{self, CardState, LayoutEntry, LayoutKey, Layouts, TITLE_HEIGHT},
@@ -10,9 +10,7 @@ use crate::{
 use callboard::lifecycle::Paths;
 use callboard_core::{
     layout::{Layout, NamedLayout},
-    store::{
-        BoardContents, BoardSummary, Feed, FeedInfo, FeedSummary, ItemViewState, ResolvedReference,
-    },
+    store::{BoardInfo, BoardSummary, Feed, FeedInfo, FeedSummary, ItemViewState},
 };
 use eframe::egui;
 use std::{
@@ -60,15 +58,17 @@ impl Cache {
     /// true, so a notice is never dropped for want of data.
     pub fn references(&self, target: &Target, feed: &str) -> bool {
         match self.contents.get(target).and_then(|e| e.contents.as_ref()) {
-            Some(Contents::Board(board)) => {
-                board
-                    .todos
-                    .iter()
-                    .any(|t| t.item.reference.as_ref().is_some_and(|r| r.feed == feed))
-                    || board
-                        .notes
+            Some(Contents::Board { items, archived }) => {
+                std::iter::once(items).chain(archived).any(|board| {
+                    board
+                        .todos
                         .iter()
-                        .any(|n| n.item.reference.as_ref().is_some_and(|r| r.feed == feed))
+                        .any(|t| t.item.reference.as_ref().is_some_and(|r| r.feed == feed))
+                        || board
+                            .notes
+                            .iter()
+                            .any(|n| n.item.reference.as_ref().is_some_and(|r| r.feed == feed))
+                })
             }
             Some(_) => false,
             None => true,
@@ -138,7 +138,7 @@ impl Cache {
                     snoozed,
                 })
             }
-            Contents::Board(board) => Some(Counts {
+            Contents::Board { items: board, .. } => Some(Counts {
                 shown: board.todos.len() + board.notes.len(),
                 snoozed: 0,
             }),
@@ -214,8 +214,8 @@ pub enum Action {
     Write(WriteOp),
     DismissWriteError,
     Prompt(PromptKind),
-    /// Ask to confirm deleting the active saved layout.
-    ConfirmDelete,
+    /// Ask to confirm a deletion.
+    ConfirmDelete(DeleteSubject),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -267,12 +267,22 @@ pub enum WriteOp {
         board_id: i64,
         kind: PromoteKind,
     },
+    Board(BoardOp),
+}
+
+/// What a successful write returned, where the window uses it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Reply {
+    Done,
+    /// A renamed layout.
+    Layout(NamedLayout),
+    /// A created board.
+    Board(BoardInfo),
 }
 
 pub struct OpDone {
     pub op: WriteOp,
-    /// The renamed layout for a rename; `None` otherwise.
-    pub result: Result<Option<NamedLayout>, String>,
+    pub result: Result<Reply, String>,
 }
 
 pub struct Channels {
@@ -290,16 +300,42 @@ pub enum PromptKind {
     SaveAs,
     New,
     Rename,
+    NewBoard,
+    RenameBoard(i64),
 }
 
-/// Confirmation for deleting a saved layout.
+impl PromptKind {
+    fn board(self) -> bool {
+        matches!(self, PromptKind::NewBoard | PromptKind::RenameBoard(_))
+    }
+}
+
+/// Something deleted only after confirmation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeleteSubject {
+    /// A saved layout.
+    Layout(String),
+    Board {
+        id: i64,
+        name: String,
+    },
+    /// A todo or note on `board` (1 for the deleted-board archive).
+    Item {
+        kind: Kind,
+        id: i64,
+        board: i64,
+        name: String,
+    },
+}
+
 pub struct DeletePrompt {
-    pub name: String,
+    pub subject: DeleteSubject,
     pub error: Option<String>,
     pub waiting: bool,
 }
 
-/// The layout-name dialog for "Save as…", "New layout…", and "Rename…".
+/// The name dialog: "Save as…", "New layout…", and "Rename…" for layouts,
+/// "New board…" and "Rename…" for boards.
 pub struct NamePrompt {
     pub kind: PromptKind,
     pub text: String,
@@ -413,15 +449,15 @@ impl App {
                             WriteOp::Rename { from, to } => {
                                 backend::rename_layout(paths, auto, from, to)
                                     .await
-                                    .map(Some)
+                                    .map(Reply::Layout)
                             }
                             WriteOp::Delete { name } => backend::delete_layout(paths, auto, name)
                                 .await
-                                .map(|_| None),
+                                .map(|_| Reply::Done),
                             WriteOp::Remember { name } => {
                                 backend::set_last_layout(paths, auto, name.as_deref())
                                     .await
-                                    .map(|_| None)
+                                    .map(|_| Reply::Done)
                             }
                             WriteOp::Snooze {
                                 feed,
@@ -435,7 +471,7 @@ impl App {
                                 });
                                 backend::patch_feed_item(paths, auto, feed, key, &patch)
                                     .await
-                                    .map(|_| None)
+                                    .map(|_| Reply::Done)
                             }
                             WriteOp::Promote {
                                 feed,
@@ -444,7 +480,22 @@ impl App {
                                 kind,
                             } => backend::promote(paths, auto, feed, key, *board_id, *kind)
                                 .await
-                                .map(|_| None),
+                                .map(|_| Reply::Done),
+                            WriteOp::Board(op) => {
+                                let mut reply = Reply::Done;
+                                for (method, resource, body) in op.requests() {
+                                    let value =
+                                        backend::send(paths, auto, method, &resource, &body)
+                                            .await?;
+                                    if let BoardOp::Create { .. } = op {
+                                        reply =
+                                            Reply::Board(serde_json::from_value(value).map_err(
+                                                |e| format!("Invalid service response: {e}"),
+                                            )?);
+                                    }
+                                }
+                                Ok(reply)
+                            }
                         }
                     });
                     if op_done.send(OpDone { op, result }).is_err() {
@@ -632,7 +683,7 @@ impl App {
             self.scheduler.refresh_layouts();
         }
         match (done.op, done.result) {
-            (WriteOp::Rename { from, .. }, Ok(Some(layout))) => {
+            (WriteOp::Rename { from, .. }, Ok(Reply::Layout(layout))) => {
                 self.layouts.renamed(&from, &layout);
                 self.prompt = None;
             }
@@ -673,6 +724,48 @@ impl App {
             (WriteOp::Promote { .. }, Err(error)) => {
                 self.write_error = Some(format!("Could not promote the item: {error}"));
             }
+            (WriteOp::Board(op), result) => self.board_done(op, result),
+        }
+    }
+
+    fn board_done(&mut self, op: BoardOp, result: Result<Reply, String>) {
+        let error = match result {
+            Ok(reply) => {
+                for id in op.boards() {
+                    self.scheduler.board_changed(id);
+                }
+                match (&op, reply) {
+                    (BoardOp::Create { .. }, Reply::Board(created)) => {
+                        self.scheduler.board_changed(created.id);
+                        self.prompt = None;
+                        self.apply(Action::Show(Target::Board(created.id)));
+                    }
+                    (BoardOp::Rename { .. }, _) => self.prompt = None,
+                    (BoardOp::Delete { id }, _) => {
+                        self.delete_prompt = None;
+                        let canvas = self.layouts.active_mut();
+                        canvas.close(&Target::Board(*id));
+                    }
+                    (BoardOp::DeleteItem { .. }, _) => self.delete_prompt = None,
+                    _ => (),
+                }
+                return;
+            }
+            Err(error) => error,
+        };
+        // Dialog writes report in their dialog; the rest in the error bar.
+        match op {
+            BoardOp::Create { .. } | BoardOp::Rename { .. } if self.prompt.is_some() => {
+                let prompt = self.prompt.as_mut().expect("checked");
+                prompt.waiting = false;
+                prompt.error = Some(error);
+            }
+            BoardOp::Delete { .. } | BoardOp::DeleteItem { .. } if self.delete_prompt.is_some() => {
+                let prompt = self.delete_prompt.as_mut().expect("checked");
+                prompt.waiting = false;
+                prompt.error = Some(error);
+            }
+            _ => self.write_error = Some(format!("{}: {error}", op.failure())),
         }
     }
 
@@ -681,12 +774,22 @@ impl App {
         let Some(prompt) = &mut self.delete_prompt else {
             return;
         };
-        if !self.layouts.begin_op(&prompt.name) {
-            prompt.error = Some("Wait for the current save to finish".into());
-            return;
-        }
-        let op = WriteOp::Delete {
-            name: prompt.name.clone(),
+        let op = match &prompt.subject {
+            DeleteSubject::Layout(name) => {
+                if !self.layouts.begin_op(name) {
+                    prompt.error = Some("Wait for the current save to finish".into());
+                    return;
+                }
+                WriteOp::Delete { name: name.clone() }
+            }
+            DeleteSubject::Board { id, .. } => WriteOp::Board(BoardOp::Delete { id: *id }),
+            DeleteSubject::Item {
+                kind, id, board, ..
+            } => WriteOp::Board(BoardOp::DeleteItem {
+                kind: *kind,
+                id: *id,
+                board: *board,
+            }),
         };
         match self.channels.ops.try_send(op) {
             Ok(()) => {
@@ -694,8 +797,10 @@ impl App {
                 prompt.error = None;
             }
             Err(_) => {
-                self.layouts.end_op(&prompt.name);
-                prompt.error = Some("The layout worker is busy or stopped; try again".into());
+                if let DeleteSubject::Layout(name) = &prompt.subject {
+                    self.layouts.end_op(name);
+                }
+                prompt.error = Some("The service writer is busy or stopped; try again".into());
             }
         }
     }
@@ -726,6 +831,38 @@ impl App {
             return;
         };
         let name = prompt.text.trim().to_owned();
+        if prompt.kind.board() {
+            let current = match prompt.kind {
+                PromptKind::RenameBoard(id) => self.cache.board(id).map(|b| b.info.name.as_str()),
+                _ => None,
+            };
+            if name.is_empty() {
+                prompt.error = Some("Enter a board name".into());
+                return;
+            }
+            if current == Some(name.as_str()) {
+                self.prompt = None;
+                return;
+            }
+            if self.cache.boards.iter().any(|b| b.info.name == name) {
+                prompt.error = Some(format!("A board named “{name}” already exists"));
+                return;
+            }
+            let op = match prompt.kind {
+                PromptKind::RenameBoard(id) => BoardOp::Rename { id, name },
+                _ => BoardOp::Create { name },
+            };
+            match self.channels.ops.try_send(WriteOp::Board(op)) {
+                Ok(()) => {
+                    prompt.waiting = true;
+                    prompt.error = None;
+                }
+                Err(_) => {
+                    prompt.error = Some("The service writer is busy or stopped; try again".into())
+                }
+            }
+            return;
+        }
         if let Err(e) = callboard_core::layout::validate_name(&name) {
             prompt.error = Some(e.to_string());
             return;
@@ -779,7 +916,9 @@ impl App {
                 layout: Layout::default(),
                 purpose: SavePurpose::New,
             },
-            PromptKind::Rename => unreachable!("handled above"),
+            PromptKind::Rename | PromptKind::NewBoard | PromptKind::RenameBoard(_) => {
+                unreachable!("handled above")
+            }
         };
         match self.channels.saves.try_send(job) {
             Ok(()) => {
@@ -853,6 +992,7 @@ impl App {
             Action::Prompt(kind) => {
                 let text = match (kind, self.layouts.active_key()) {
                     (PromptKind::Rename, LayoutKey::Saved(name)) => name.clone(),
+                    (PromptKind::RenameBoard(id), _) => self.cache.title(&Target::Board(id)),
                     _ => String::new(),
                 };
                 self.prompt = Some(NamePrompt {
@@ -863,14 +1003,12 @@ impl App {
                     select_all: true,
                 })
             }
-            Action::ConfirmDelete => {
-                if let LayoutKey::Saved(name) = self.layouts.active_key() {
-                    self.delete_prompt = Some(DeletePrompt {
-                        name: name.clone(),
-                        error: None,
-                        waiting: false,
-                    });
-                }
+            Action::ConfirmDelete(subject) => {
+                self.delete_prompt = Some(DeletePrompt {
+                    subject,
+                    error: None,
+                    waiting: false,
+                });
             }
         }
     }
@@ -1076,7 +1214,7 @@ impl App {
             {
                 actions.push(Action::Prompt(PromptKind::New));
             }
-            if matches!(self.layouts.active_key(), LayoutKey::Saved(_)) {
+            if let LayoutKey::Saved(name) = self.layouts.active_key() {
                 if ui
                     .small_button("Rename…")
                     .on_hover_text("Rename this layout")
@@ -1089,7 +1227,7 @@ impl App {
                     .on_hover_text("Delete this saved layout")
                     .clicked()
                 {
-                    actions.push(Action::ConfirmDelete);
+                    actions.push(Action::ConfirmDelete(DeleteSubject::Layout(name.clone())));
                 }
             }
             ui.separator();
@@ -1149,6 +1287,8 @@ impl App {
             PromptKind::SaveAs => "Save layout as",
             PromptKind::New => "New layout",
             PromptKind::Rename => "Rename layout",
+            PromptKind::NewBoard => "New board",
+            PromptKind::RenameBoard(_) => "Rename board",
         };
         let mut submit = false;
         let mut cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
@@ -1157,7 +1297,11 @@ impl App {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ui.ctx(), |ui| {
-                let label = ui.label("Layout name");
+                let label = ui.label(if prompt.kind.board() {
+                    "Board name"
+                } else {
+                    "Layout name"
+                });
                 let mut output = ui
                     .add_enabled_ui(!prompt.waiting, |ui| {
                         egui::TextEdit::singleline(&mut prompt.text)
@@ -1200,20 +1344,37 @@ impl App {
         }
     }
 
-    /// Confirms deleting a saved layout. Escape cancels.
+    /// Confirms a deletion. Escape cancels.
     fn delete_window(&mut self, ui: &mut egui::Ui) {
         let Some(prompt) = &self.delete_prompt else {
             return;
         };
         let mut confirm = false;
         let mut cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
-        egui::Window::new("Delete layout")
+        let (title, question, detail) = match &prompt.subject {
+            DeleteSubject::Layout(name) => (
+                "Delete layout".to_owned(),
+                format!("Delete the layout “{name}”?"),
+                "Feeds and boards are not affected.",
+            ),
+            DeleteSubject::Board { name, .. } => (
+                "Delete board".to_owned(),
+                format!("Delete the board “{name}”?"),
+                "Its todos and notes, archived ones included, move to the deleted-board archive, where they can be restored.",
+            ),
+            DeleteSubject::Item { kind, name, .. } => (
+                format!("Delete {}", kind.noun()),
+                format!("Delete the {} “{name}”?", kind.noun()),
+                "It cannot be restored. Archive it instead to keep it.",
+            ),
+        };
+        egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ui.ctx(), |ui| {
-                ui.label(format!("Delete the layout “{}”?", prompt.name));
-                ui.weak("Feeds and boards are not affected.");
+                ui.label(question);
+                ui.weak(detail);
                 if let Some(error) = &prompt.error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
@@ -1309,7 +1470,16 @@ impl App {
                 });
             }
             ui.separator();
-            ui.heading("Boards");
+            ui.horizontal(|ui| {
+                ui.heading("Boards");
+                if ui
+                    .small_button("New board…")
+                    .on_hover_text("Create a board and place its card")
+                    .clicked()
+                {
+                    actions.push(Action::Prompt(PromptKind::NewBoard));
+                }
+            });
             if self.cache.lists_loaded() && self.cache.boards.is_empty() {
                 ui.weak("No boards yet");
             }
@@ -1383,6 +1553,20 @@ impl App {
                         op: CardOp::Close,
                     });
                     ui.close();
+                }
+                if let Target::Board(id) = target {
+                    ui.separator();
+                    if ui.button("Rename board…").clicked() {
+                        actions.push(Action::Prompt(PromptKind::RenameBoard(*id)));
+                        ui.close();
+                    }
+                    if ui.button("Delete board…").clicked() {
+                        actions.push(Action::ConfirmDelete(DeleteSubject::Board {
+                            id: *id,
+                            name: title.clone(),
+                        }));
+                        ui.close();
+                    }
                 }
             });
             if let Some(counts) = self.cache.counts(target) {
@@ -1777,7 +1961,16 @@ impl App {
             Some(Contents::Feed(feed)) => {
                 show_feed(ui, feed, salt, scroll, &self.cache.boards, actions)
             }
-            Some(Contents::Board(board)) => show_board(ui, board, salt, scroll),
+            Some(Contents::Board { items, archived }) => board::show(
+                ui,
+                target,
+                items,
+                archived.as_ref(),
+                &self.cache.boards,
+                salt,
+                wheel(scroll),
+                actions,
+            ),
         }
     }
 }
@@ -1932,26 +2125,13 @@ fn stale(feed: &FeedInfo) -> bool {
         })
 }
 
-fn link(ui: &mut egui::Ui, url: Option<&str>) {
+pub(crate) fn link(ui: &mut egui::Ui, url: Option<&str>) {
     if let Some(url) = url {
         if url.starts_with("https://") || url.starts_with("http://") {
             ui.hyperlink_to(url, url);
         } else {
             ui.label(url);
         }
-    }
-}
-
-fn reference(ui: &mut egui::Ui, resolved: Option<&ResolvedReference>) {
-    match resolved {
-        Some(ResolvedReference::Live { item }) => {
-            ui.label(format!("Current source: {}", item.title));
-            link(ui, item.url.as_deref());
-        }
-        Some(ResolvedReference::SourceGone) => {
-            ui.weak("Source gone");
-        }
-        None => (),
     }
 }
 
@@ -1971,11 +2151,6 @@ fn snooze_text(state: &ItemViewState) -> String {
         (Some(until), false) => format!("Snoozed · {until}"),
         (None, _) => "Snoozed until it changes".into(),
     }
-}
-
-/// "1 note", "2 notes".
-fn count(n: usize, noun: &str) -> String {
-    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }
 
 /// Snooze choices: label and duration.
@@ -2126,54 +2301,6 @@ fn show_feed(
         });
 }
 
-fn show_board(ui: &mut egui::Ui, board: &BoardContents, salt: egui::Id, scroll: bool) {
-    let open = board.todos.iter().filter(|t| !t.item.done).count();
-    ui.label(format!(
-        "{} ({open} open) · {}",
-        count(board.todos.len(), "todo"),
-        count(board.notes.len(), "note")
-    ));
-    egui::ScrollArea::vertical()
-        .id_salt(salt.with("board_items"))
-        .auto_shrink([false, false])
-        .wheel_scroll_multiplier(wheel(scroll))
-        .show(ui, |ui| {
-            ui.strong("Todos");
-            if board.todos.is_empty() {
-                ui.weak("No todos");
-            }
-            for todo in &board.todos {
-                ui.group(|ui| {
-                    ui.set_width(ui.available_width());
-                    let mut done = todo.item.done;
-                    ui.add_enabled(false, egui::Checkbox::new(&mut done, &todo.item.title));
-                    if let Some(body) = &todo.item.body {
-                        ui.label(body);
-                    }
-                    link(ui, todo.item.url.as_deref());
-                    reference(ui, todo.resolved_reference.as_ref());
-                });
-            }
-            ui.strong("Notes");
-            if board.notes.is_empty() {
-                ui.weak("No notes");
-            }
-            for note in &board.notes {
-                ui.group(|ui| {
-                    ui.set_width(ui.available_width());
-                    if let Some(title) = &note.item.title {
-                        ui.strong(title);
-                    }
-                    if !note.item.body.is_empty() {
-                        ui.label(&note.item.body);
-                    }
-                    link(ui, note.item.url.as_deref());
-                    reference(ui, note.resolved_reference.as_ref());
-                });
-            }
-        });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2295,8 +2422,8 @@ mod tests {
             snooze_text(&state(Some(later), false)),
             "Snoozed · wakes in 3days 4h"
         );
-        assert_eq!(count(1, "note"), "1 note");
-        assert_eq!(count(0, "todo"), "0 todos");
+        assert_eq!(board::count(1, "note"), "1 note");
+        assert_eq!(board::count(0, "todo"), "0 todos");
     }
 
     #[test]

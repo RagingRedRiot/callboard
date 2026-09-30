@@ -2,7 +2,7 @@
 //! tree and pointer events (clicks, right-clicks, typing, drags, the wheel)
 //! with a fake service.
 use crate::{
-    app::{App, OpDone, SaveDone, SavePurpose, TestEnds, WriteOp},
+    app::{App, OpDone, Reply, SaveDone, SavePurpose, TestEnds, WriteOp},
     backend::{Contents, Fetched, List, ListData, PromoteKind, Request, Target},
     workspace::{Canvas, LayoutKey, MIN_CARD, SAVE_DELAY, TITLE_HEIGHT},
 };
@@ -66,10 +66,50 @@ impl Default for Saved {
     }
 }
 
+/// Board contents from JSON todos and notes, which need only the fields a
+/// test cares about.
+fn board(
+    id: i64,
+    name: Option<&str>,
+    todos: &[serde_json::Value],
+    notes: &[serde_json::Value],
+) -> BoardContents {
+    let item = |fields: &serde_json::Value, defaults: serde_json::Value| {
+        let mut value = defaults;
+        for (k, v) in fields.as_object().unwrap() {
+            value[k] = v.clone();
+        }
+        value["resolved_reference"] = json!(null);
+        value
+    };
+    let common = json!({"board_id": id, "body": null, "url": null, "reference": null,
+        "position": 0, "created_at_ms": 0, "updated_at_ms": 0, "archived_at_ms": null,
+        "archived_from_board": null});
+    let todo = |t: &serde_json::Value| {
+        let mut d = common.clone();
+        d["title"] = json!("");
+        d["done"] = json!(false);
+        item(t, d)
+    };
+    let note = |n: &serde_json::Value| {
+        let mut d = common.clone();
+        d["title"] = json!(null);
+        d["color"] = json!(null);
+        item(n, d)
+    };
+    serde_json::from_value(json!({
+        "board": name.map(|name| json!({"id": id, "name": name})),
+        "todos": todos.iter().map(todo).collect::<Vec<_>>(),
+        "notes": notes.iter().map(note).collect::<Vec<_>>(),
+    }))
+    .unwrap()
+}
+
 /// Answer a fetch the way the service would for the seeded data. Feed "a" has
-/// one item; "b" has seven, two snoozed. Inbox has one todo and two notes.
-/// Loaded feed contents always hold item 1 and item 2, snoozed; feed "long"
-/// has 200 visible items.
+/// one item; "b" has seven, two snoozed. Inbox has an open and a done todo and
+/// a note, and one archived todo; Later is empty; the deleted-board archive
+/// holds one todo. Loaded feed contents always hold item 1 and item 2,
+/// snoozed; feed "long" has 200 visible items.
 fn answer(request: Request, saved: &Saved) -> Fetched {
     let lists = request
         .lists
@@ -86,15 +126,26 @@ fn answer(request: Request, saved: &Saved) -> Fetched {
                         })
                         .into(),
                 ),
-                List::Boards => ListData::Boards(vec![BoardSummary {
-                    info: BoardInfo {
-                        id: 2,
-                        name: "Inbox".into(),
+                List::Boards => ListData::Boards(vec![
+                    BoardSummary {
+                        info: BoardInfo {
+                            id: 2,
+                            name: "Inbox".into(),
+                        },
+                        todo_count: 2,
+                        open_todo_count: 1,
+                        note_count: 1,
                     },
-                    todo_count: 1,
-                    open_todo_count: 1,
-                    note_count: 2,
-                }]),
+                    BoardSummary {
+                        info: BoardInfo {
+                            id: 3,
+                            name: "Later".into(),
+                        },
+                        todo_count: 0,
+                        open_todo_count: 0,
+                        note_count: 0,
+                    },
+                ]),
                 List::Layouts => {
                     ListData::Layouts(saved.layouts.clone(), saved.preferences.clone())
                 }
@@ -137,14 +188,37 @@ fn answer(request: Request, saved: &Saved) -> Fetched {
                     )]
                     .into(),
                 }),
-                Target::Board(2) => Contents::Board(BoardContents {
-                    board: Some(BoardInfo {
-                        id: 2,
-                        name: "Inbox".into(),
-                    }),
-                    todos: vec![],
-                    notes: vec![],
-                }),
+                Target::Board(2) => Contents::Board {
+                    items: board(
+                        2,
+                        Some("Inbox"),
+                        &[
+                            json!({"id": 10, "title": "Write notes"}),
+                            json!({"id": 11, "title": "Ship it", "done": true, "position": 1}),
+                        ],
+                        &[json!({"id": 20, "body": "Remember the milk", "color": "yellow"})],
+                    ),
+                    archived: Some(board(
+                        2,
+                        Some("Inbox"),
+                        &[json!({"id": 12, "title": "Old task", "archived_at_ms": 1})],
+                        &[],
+                    )),
+                },
+                Target::Board(3) => Contents::Board {
+                    items: board(3, Some("Later"), &[], &[]),
+                    archived: Some(board(3, Some("Later"), &[], &[])),
+                },
+                Target::Archive => Contents::Board {
+                    items: board(
+                        1,
+                        None,
+                        &[json!({"id": 13, "title": "Orphan", "archived_at_ms": 1,
+                            "archived_from_board": "Gone"})],
+                        &[],
+                    ),
+                    archived: None,
+                },
                 _ => Contents::Missing,
             };
             (target, Ok(contents))
@@ -367,7 +441,7 @@ fn add_card_places_it_in_view_and_again_only_reveals_it() {
     ui.harness.get_by_label("Board: Inbox").click();
     ui.settle();
     assert_eq!(ui.order(), [feed("a"), Target::Board(2)]);
-    ui.harness.get_by_label("Inbox (0)");
+    ui.harness.get_by_label("Inbox (3)");
     assert!(
         ui.app()
             .canvas_area()
@@ -485,7 +559,7 @@ fn clicking_a_layout_switches_to_it() {
         ui.app().layouts.active_key(),
         &LayoutKey::Saved("Ops".into())
     );
-    ui.harness.get_by_label("Inbox (0)");
+    ui.harness.get_by_label("Inbox (3)");
     assert!(ui.harness.query_by_label("a title (1)").is_none());
 }
 
@@ -522,7 +596,7 @@ fn show_retargets_a_card_in_place_and_disables_placed_targets() {
     ui.settle();
     assert_eq!(ui.order(), [feed("a"), Target::Board(2)]);
     assert_eq!(ui.card(&Target::Board(2)), b, "same place and size");
-    ui.harness.get_by_label("Inbox (0)");
+    ui.harness.get_by_label("Inbox (3)");
 }
 
 #[test]
@@ -820,7 +894,7 @@ fn rename_refuses_taken_names_then_renames_the_active_layout() {
         .ops_done
         .send(OpDone {
             op,
-            result: Ok(Some(renamed)),
+            result: Ok(Reply::Layout(renamed)),
         })
         .unwrap();
     ui.settle();
@@ -862,7 +936,7 @@ fn delete_asks_for_confirmation_then_opens_the_next_layout() {
         .ops_done
         .send(OpDone {
             op,
-            result: Ok(None),
+            result: Ok(Reply::Done),
         })
         .unwrap();
     ui.settle();
@@ -911,7 +985,7 @@ fn feed_items_snooze_for_a_duration_or_until_they_change() {
         .ops_done
         .send(OpDone {
             op: ops[0].clone(),
-            result: Ok(None),
+            result: Ok(Reply::Done),
         })
         .unwrap();
     ui.harness.step();
@@ -1083,4 +1157,399 @@ fn a_deleted_target_stays_as_a_placeholder_until_retargeted() {
     assert_eq!(ui.order(), [feed("a")]);
     assert_eq!(ui.card(&feed("a")), before, "same place and size");
     ui.harness.get_by_label("a title (1)");
+}
+
+// Board editing (DESIGN.md §6.3). Inbox holds todo 10 "Write notes", done
+// todo 11 "Ship it", note 20 "Remember the milk", and archived todo 12.
+
+use crate::board::{BoardOp, Kind};
+use egui_kittest::kittest::by;
+
+/// A window with the Inbox card placed and the startup writes drained.
+fn inbox() -> Ui {
+    let mut ui = Ui::new();
+    ui.harness.get_by_label("Inbox").click();
+    ui.settle();
+    ui.ops();
+    ui
+}
+
+fn board_op(op: BoardOp) -> WriteOp {
+    WriteOp::Board(op)
+}
+
+fn patch(kind: Kind, id: i64, patch: serde_json::Value) -> WriteOp {
+    board_op(BoardOp::Patch {
+        kind,
+        id,
+        board: 2,
+        patch,
+    })
+}
+
+impl Ui {
+    fn field(&self, placeholder: &'static str) -> egui_kittest::Node<'_> {
+        self.harness
+            .get(by().predicate(move |n| n.placeholder() == Some(placeholder)))
+    }
+
+    /// Open the n-th item menu (…) on the canvas, top to bottom.
+    fn item_menu(&mut self, n: usize) {
+        self.harness
+            .query_all_by_label("…")
+            .nth(n)
+            .expect("an item menu")
+            .click();
+        self.settle();
+    }
+
+    /// Focus a labelled field and type into it.
+    fn type_into(&mut self, label: &str, text: &str) {
+        self.harness.get_by_label(label).focus();
+        self.harness.step();
+        type_keys(self, text);
+    }
+
+    /// A menu entry on the canvas, not the sidebar or layout bar entry
+    /// with the same label.
+    fn menu_item(&mut self, label: &str) {
+        let area = self.app().canvas_area();
+        self.harness
+            .query_all_by_label(label)
+            .find(|n| area.contains(n.rect().center()))
+            .unwrap_or_else(|| panic!("no “{label}” menu entry on the canvas"))
+            .click();
+        self.settle();
+    }
+
+    fn finish(&mut self, op: WriteOp, result: Result<Reply, String>) {
+        self.ends.ops_done.send(OpDone { op, result }).unwrap();
+        self.settle();
+    }
+}
+
+#[test]
+fn enter_adds_a_todo_and_keeps_the_field_ready() {
+    let mut ui = inbox();
+    ui.field("Add a todo").focus();
+    ui.harness.step();
+    type_keys(&mut ui, "Buy milk");
+    ui.harness.key_press(egui::Key::Enter);
+    ui.settle();
+    type_keys(&mut ui, "Call Sam");
+    ui.harness.key_press(egui::Key::Enter);
+    ui.settle();
+    assert_eq!(
+        ui.ops(),
+        [
+            board_op(BoardOp::AddTodo {
+                board: 2,
+                title: "Buy milk".into()
+            }),
+            board_op(BoardOp::AddTodo {
+                board: 2,
+                title: "Call Sam".into()
+            }),
+        ]
+    );
+    assert_eq!(ui.field("Add a todo").value().as_deref(), Some(""));
+    // Blank entries add nothing; notes have their own field.
+    ui.harness.key_press(egui::Key::Enter);
+    ui.settle();
+    ui.field("Add a note").focus();
+    ui.harness.step();
+    type_keys(&mut ui, "Idea");
+    ui.harness.key_press(egui::Key::Enter);
+    ui.settle();
+    assert_eq!(
+        ui.ops(),
+        [board_op(BoardOp::AddNote {
+            board: 2,
+            body: "Idea".into()
+        })]
+    );
+}
+
+#[test]
+fn a_todo_checkbox_marks_it_done_or_not() {
+    let mut ui = inbox();
+    ui.harness.get_by_label("Write notes").click();
+    ui.settle();
+    ui.harness.get_by_label("Ship it").click();
+    ui.settle();
+    assert_eq!(
+        ui.ops(),
+        [
+            patch(Kind::Todo, 10, json!({"done": true})),
+            patch(Kind::Todo, 11, json!({"done": false})),
+        ]
+    );
+}
+
+#[test]
+fn the_editor_saves_changed_fields_only_and_escape_discards() {
+    let mut ui = inbox();
+    ui.item_menu(0);
+    ui.harness.get_by_label("Edit…").click();
+    ui.settle();
+    // An empty title is refused before anything is sent.
+    ui.clear_field("Title");
+    ui.harness.get_by_label("Save").click();
+    ui.settle();
+    ui.harness.get_by_label("A todo needs a title");
+    ui.type_into("Title", "Write the notes");
+    ui.type_into("Link", "https://example.com");
+    ui.harness.get_by_label("Save").click();
+    ui.settle();
+    assert_eq!(
+        ui.ops(),
+        [patch(
+            Kind::Todo,
+            10,
+            json!({"title": "Write the notes", "url": "https://example.com"})
+        )]
+    );
+    assert!(ui.harness.query_by_label("Title").is_none(), "closed");
+    // The note editor also offers colors; Escape discards.
+    ui.item_menu(2);
+    ui.harness.get_by_label("Edit…").click();
+    ui.settle();
+    ui.harness.get_by_label("Green").click();
+    ui.settle();
+    ui.harness.get_by_label("Text").focus();
+    ui.harness.step();
+    ui.harness.key_press(egui::Key::Escape);
+    ui.settle();
+    assert!(ui.harness.query_by_label("Text").is_none(), "discarded");
+    assert!(ui.ops().is_empty());
+    ui.item_menu(2);
+    ui.harness.get_by_label("Edit…").click();
+    ui.settle();
+    ui.harness.get_by_label("None").click();
+    ui.harness.get_by_label("Save").click();
+    ui.settle();
+    assert_eq!(ui.ops(), [patch(Kind::Note, 20, json!({"color": null}))]);
+}
+
+#[test]
+fn dragging_a_handle_moves_the_item_within_its_list() {
+    let mut ui = inbox();
+    let handles: Vec<Pos2> = ui
+        .harness
+        .query_all_by_label("Drag to reorder")
+        .map(|n| n.rect().center())
+        .collect();
+    assert_eq!(handles.len(), 3, "two todos and a note");
+    // Below "Ship it": the first todo becomes the second.
+    ui.drag(handles[0], handles[1] + Vec2::new(0.0, 20.0));
+    assert_eq!(ui.ops(), [patch(Kind::Todo, 10, json!({"position": 1}))]);
+    // Dropped where it started: nothing to send.
+    ui.drag(handles[1], handles[1] + Vec2::new(0.0, 4.0));
+    assert!(ui.ops().is_empty());
+}
+
+#[test]
+fn the_item_menu_moves_archives_and_deletes_after_confirming() {
+    let mut ui = inbox();
+    ui.item_menu(0);
+    ui.harness.get_by_label_contains("Move to").click();
+    ui.settle();
+    ui.menu_item("Later");
+    ui.item_menu(0);
+    ui.harness.get_by_label("Archive").click();
+    ui.settle();
+    assert_eq!(
+        ui.ops(),
+        [
+            patch(Kind::Todo, 10, json!({"board_id": 3})),
+            patch(Kind::Todo, 10, json!({"archived": true})),
+        ]
+    );
+    ui.item_menu(2);
+    ui.menu_item("Delete…");
+    ui.harness
+        .get_by_label("Delete the note “Remember the milk”?");
+    ui.harness.get_by_label("Delete").click();
+    ui.settle();
+    let op = board_op(BoardOp::DeleteItem {
+        kind: Kind::Note,
+        id: 20,
+        board: 2,
+    });
+    assert_eq!(ui.ops(), std::slice::from_ref(&op));
+    ui.harness.get_by_label("Deleting…");
+    ui.finish(op, Ok(Reply::Done));
+    assert!(
+        ui.harness
+            .query_by_label_contains("Delete the note")
+            .is_none()
+    );
+}
+
+#[test]
+fn archived_items_show_on_request_and_restore() {
+    let mut ui = inbox();
+    assert!(ui.harness.query_by_label_contains("Old task").is_none());
+    ui.harness.get_by_label("Show archived (1)").click();
+    ui.settle();
+    ui.harness.get_by_label("Old task");
+    ui.harness.get_by_label("Restore").click();
+    ui.settle();
+    assert_eq!(
+        ui.ops(),
+        [patch(Kind::Todo, 12, json!({"archived": false}))]
+    );
+}
+
+#[test]
+fn the_deleted_board_archive_restores_to_a_chosen_board() {
+    let mut ui = Ui::new();
+    ui.harness.get_by_label("Deleted-board archive").click();
+    ui.settle();
+    ui.ops();
+    ui.harness.get_by_label("From “Gone”");
+    ui.harness.get_by_label_contains("Restore to").click();
+    ui.settle();
+    ui.menu_item("Inbox");
+    assert_eq!(
+        ui.ops(),
+        [board_op(BoardOp::Patch {
+            kind: Kind::Todo,
+            id: 13,
+            board: 1,
+            patch: json!({"archived": false, "board_id": 2}),
+        })]
+    );
+}
+
+#[test]
+fn the_board_menu_renames_archives_done_and_deletes_the_board() {
+    let mut ui = inbox();
+    ui.harness.get_by_label("Board").click();
+    ui.settle();
+    ui.menu_item("Rename…");
+    ui.harness.get_by_label("Rename board");
+    assert_eq!(
+        ui.harness.get_by_label("Board name").value().as_deref(),
+        Some("Inbox")
+    );
+    type_keys(&mut ui, "Later");
+    ui.harness.key_press(egui::Key::Enter);
+    ui.settle();
+    ui.harness
+        .get_by_label("A board named “Later” already exists");
+    type_keys(&mut ui, " on");
+    ui.harness.key_press(egui::Key::Enter);
+    ui.settle();
+    let op = board_op(BoardOp::Rename {
+        id: 2,
+        name: "Later on".into(),
+    });
+    assert_eq!(ui.ops(), std::slice::from_ref(&op));
+    ui.finish(op, Ok(Reply::Done));
+    assert!(ui.harness.query_by_label("Rename board").is_none());
+
+    ui.harness.get_by_label("Board").click();
+    ui.settle();
+    ui.harness.get_by_label("Archive done").click();
+    ui.settle();
+    assert_eq!(
+        ui.ops(),
+        [board_op(BoardOp::ArchiveDone {
+            board: 2,
+            ids: vec![11]
+        })]
+    );
+
+    ui.harness.get_by_label("Board").click();
+    ui.settle();
+    ui.harness.get_by_label("Delete board…").click();
+    ui.settle();
+    ui.harness.get_by_label("Delete the board “Inbox”?");
+    ui.harness.get_by_label("Delete").click();
+    ui.settle();
+    let op = board_op(BoardOp::Delete { id: 2 });
+    assert_eq!(ui.ops(), std::slice::from_ref(&op));
+    // A refusal stays in the dialog.
+    ui.finish(op.clone(), Err("HTTP 503 Service Unavailable: busy".into()));
+    ui.harness.get_by_label_contains("HTTP 503");
+    ui.harness.get_by_label("Delete").click();
+    ui.settle();
+    assert_eq!(ui.ops(), std::slice::from_ref(&op));
+    ui.finish(op, Ok(Reply::Done));
+    assert_eq!(ui.order(), [feed("a")], "the card closes");
+}
+
+#[test]
+fn new_board_creates_it_and_places_its_card() {
+    let mut ui = Ui::new();
+    ui.ops();
+    ui.harness.get_by_label("New board…").click();
+    ui.settle();
+    ui.harness.get_by_label("New board");
+    type_keys(&mut ui, "Ideas");
+    ui.harness.key_press(egui::Key::Enter);
+    ui.settle();
+    let op = board_op(BoardOp::Create {
+        name: "Ideas".into(),
+    });
+    assert_eq!(ui.ops(), std::slice::from_ref(&op));
+    ui.harness.get_by_label("Saving…");
+    ui.finish(
+        op,
+        Ok(Reply::Board(BoardInfo {
+            id: 4,
+            name: "Ideas".into(),
+        })),
+    );
+    assert!(ui.harness.query_by_label("New board").is_none());
+    assert_eq!(ui.order(), [feed("a"), Target::Board(4)]);
+}
+
+#[test]
+fn a_board_entry_menu_offers_rename_and_delete() {
+    let mut ui = Ui::new();
+    ui.harness.get_by_label("Later").click_secondary();
+    ui.settle();
+    ui.harness.get_by_label("Delete board…").click();
+    ui.settle();
+    ui.harness.get_by_label("Delete the board “Later”?");
+    ui.harness.get_by_label("Cancel").click();
+    ui.settle();
+    assert!(ui.app().delete_prompt.is_none());
+    ui.harness.get_by_label("Later").click_secondary();
+    ui.settle();
+    ui.harness.get_by_label("Rename board…").click();
+    ui.settle();
+    assert_eq!(
+        ui.harness.get_by_label("Board name").value().as_deref(),
+        Some("Later")
+    );
+    assert!(matches!(
+        ui.app().prompt.as_ref().map(|p| p.kind),
+        Some(crate::app::PromptKind::RenameBoard(3))
+    ));
+}
+
+#[test]
+fn board_writes_refetch_on_success_and_report_failures() {
+    let mut ui = inbox();
+    let op = patch(Kind::Todo, 10, json!({"done": true}));
+    ui.ends
+        .ops_done
+        .send(OpDone {
+            op: op.clone(),
+            result: Ok(Reply::Done),
+        })
+        .unwrap();
+    ui.harness.step();
+    ui.harness.step();
+    let request = ui.ends.requests.try_recv().expect("a refetch");
+    assert!(request.targets.contains(&Target::Board(2)));
+    assert!(request.lists.contains(&crate::backend::List::Boards));
+    ui.ends.responses.send(answer(request, &ui.saved)).unwrap();
+    ui.settle();
+    ui.finish(op, Err("HTTP 404 Not Found: todo not found".into()));
+    ui.harness
+        .get_by_label_contains("Could not change the todo: HTTP 404");
 }

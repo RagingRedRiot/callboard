@@ -206,6 +206,12 @@ impl Scheduler {
         }
     }
 
+    /// Refetch a board (or the archive, ID 1) and the board list, as its
+    /// change notice would, after this window changed it.
+    pub fn board_changed(&mut self, id: i64) {
+        self.invalidate(Change::Board { id });
+    }
+
     /// Fetch `target` soon, for example when a card first shows it. Already
     /// in flight: its response is coming, so it is not queued again.
     pub fn want(&mut self, target: Target) {

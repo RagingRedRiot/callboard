@@ -67,7 +67,7 @@ async fn gui_connection_starts_daemon_once_and_daemon_survives_client_exit() {
             .iter()
             .any(|(_, r)| matches!(r, Ok(ListData::Boards(b)) if b.is_empty()))
     );
-    assert!(matches!(first.targets[0].1, Ok(Contents::Board(_))));
+    assert!(matches!(first.targets[0].1, Ok(Contents::Board { .. })));
     assert!(paths.socket().exists());
     let stream = UnixStream::connect(paths.socket()).unwrap();
     let pid = rustix::net::sockopt::socket_peercred(&stream).unwrap().pid;

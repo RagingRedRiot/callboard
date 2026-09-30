@@ -1,5 +1,5 @@
-//! Read-only service access. Never opens SQLite; auto-start uses the shared
-//! client lifecycle, so at most one detached service runs per data directory.
+//! Service access. Never opens SQLite; auto-start uses the shared client
+//! lifecycle, so at most one detached service runs per data directory.
 use callboard::{client, lifecycle::Paths};
 use callboard_core::{
     layout::{NamedLayout, Preferences},
@@ -25,7 +25,12 @@ pub enum Target {
 
 pub enum Contents {
     Feed(Feed),
-    Board(BoardContents),
+    /// A user board with its archived items, or the deleted-board archive
+    /// (whose items are all archived) with `archived: None`.
+    Board {
+        items: BoardContents,
+        archived: Option<BoardContents>,
+    },
     /// The feed or board no longer exists; its card stays as a placeholder.
     Missing,
 }
@@ -149,11 +154,19 @@ async fn contents(
                 .await?
                 .map(Contents::Feed)
         }
-        Target::Board(id) if *id > 1 => get(paths, auto, &format!("/boards/{id}"))
-            .await?
-            .map(Contents::Board),
+        Target::Board(id) if *id > 1 => match get(paths, auto, &format!("/boards/{id}")).await? {
+            // Deleted between the two reads: the next notice refetches both.
+            Some(items) => Some(Contents::Board {
+                items,
+                archived: get(paths, auto, &format!("/boards/{id}/archive")).await?,
+            }),
+            None => None,
+        },
         Target::Board(_) => None,
-        Target::Archive => Some(Contents::Board(required(paths, auto, "/archive").await?)),
+        Target::Archive => Some(Contents::Board {
+            items: required(paths, auto, "/archive").await?,
+            archived: None,
+        }),
     };
     Ok(found.unwrap_or(Contents::Missing))
 }
@@ -336,6 +349,17 @@ pub enum PromoteKind {
     Note,
 }
 
+/// Send any write (DESIGN.md §8.1) and return its JSON reply.
+pub async fn send(
+    paths: &Paths,
+    auto: Option<&Path>,
+    method: &str,
+    resource: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    write(paths, auto, method, resource, body).await
+}
+
 /// Copy a feed item into a board as a todo or note (§5.3).
 pub async fn promote(
     paths: &Paths,
@@ -450,7 +474,7 @@ mod tests {
         assert_eq!(lists.feeds.len(), 1);
         assert_eq!(lists.boards.len(), 1);
         assert_eq!(lists.layouts[0].name, "Day");
-        let Ok(Contents::Board(board)) = &targets[0].1 else {
+        let Ok(Contents::Board { items: board, .. }) = &targets[0].1 else {
             panic!("missing board")
         };
         assert_eq!(board.todos[0].item.title, "Original");
@@ -488,7 +512,11 @@ mod tests {
         assert_eq!(lists.layouts.len(), 1);
         assert!(matches!(targets[0].1, Ok(Contents::Missing)));
         assert!(matches!(targets[1].1, Ok(Contents::Missing)));
-        let Ok(Contents::Board(archive)) = &targets[2].1 else {
+        let Ok(Contents::Board {
+            items: archive,
+            archived: None,
+        }) = &targets[2].1
+        else {
             panic!("missing archive")
         };
         assert!(matches!(
@@ -681,7 +709,7 @@ mod tests {
         promote(&service.paths, None, "work", key, id, PromoteKind::Todo)
             .await
             .unwrap();
-        let Some((_, Ok(Contents::Board(board)))) =
+        let Some((_, Ok(Contents::Board { items: board, .. }))) =
             fetch(&service.paths, None, &one(Target::Board(id)))
                 .await
                 .targets

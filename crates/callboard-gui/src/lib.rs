@@ -1,6 +1,7 @@
 //! Desktop frontend and service connection helpers.
 pub mod app;
 pub mod backend;
+pub mod board;
 pub mod events;
 pub mod sync;
 #[cfg(test)]

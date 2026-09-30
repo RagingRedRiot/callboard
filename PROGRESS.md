@@ -728,7 +728,44 @@ everything passed. Stopped at the Phase 3 review point.
 - Replaced leftover "panel" wording in comments and the `layouts` help text.
   Full local workflow passed.
 
+## Board editing in the GUI
+
+DESIGN.md §6.3 now specifies board cards; the service API was already
+complete, so this is GUI-only (new `board.rs`).
+
+- Writes: one `WriteOp::Board(BoardOp)` covers create, rename, and delete
+  board, add todo or note, patch an item (done, fields, position, move,
+  archive, restore), archive done todos, and delete an item. Each op lists
+  its requests and the boards it changes; success refetches those boards and
+  the board list without waiting for the notice. Write replies are now a
+  `Reply` enum (a renamed layout, a created board, or nothing).
+- Board targets fetch `/boards/{id}` and `/boards/{id}/archive` together
+  (`Contents::Board { items, archived }`).
+- Card: add fields (Enter adds and keeps focus), enabled checkboxes, an item
+  menu (…) with Edit… (in-place editor sending only changed fields; notes get
+  a color), Move to, Archive, Delete… (confirmed); dotted drag handles that
+  reorder within a list; Show archived with Restore; a Board menu (Rename…,
+  Archive done, Delete board…). Notes render as colored sticky notes, beside
+  the todos when the card is at least 600 wide. The deleted-board archive
+  card restores to a chosen board. Board cards use a solid scroll bar so it
+  never covers the item menus.
+- Sidebar: New board… (creates and places the card) and Rename/Delete in a
+  board entry's context menu. The name and delete dialogs are shared with
+  layouts (`PromptKind::NewBoard/RenameBoard`, `DeleteSubject`). Deleting a
+  board from the GUI closes its card in the active layout.
+- Tests: 11 interaction tests (adding, done, editor save/refusal/Escape and
+  note colors, drag reorder, move/archive/delete with confirmation, archived
+  restore, archive-card restore, board menu rename/archive-done/delete with a
+  refusal, new board placement, entry context menu, refetch and error bar),
+  draft and op unit tests, and a test that runs every op against the real
+  service.
+- Desktop: added todos by typing, ticked one, reordered by dragging, edited a
+  title (only the title was sent), created a board (card placed) and deleted
+  it (card closed, layout saved), with service state checked over the socket.
+- Known: a ticked checkbox shows its old state for the moment until the
+  refetch arrives (no optimistic update).
+
 ## Suggested next
 
-Board editing in the GUI (in progress), then drag-to-promote (§6.3) and quick
-open (Ctrl+K).
+Drag-to-promote (§6.3: drag a feed item onto a board card) and quick open
+(Ctrl+K). Board editing may want polish after real use.
