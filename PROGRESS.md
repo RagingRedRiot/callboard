@@ -765,7 +765,21 @@ complete, so this is GUI-only (new `board.rs`).
 - Known: a ticked checkbox shows its old state for the moment until the
   refetch arrives (no optimistic update).
 
+## Drag-to-promote
+
+- Feed items have a dotted handle. Dragging it carries the item (egui's
+  drag-and-drop payload) with a ghost of its title; the topmost board card
+  under the pointer highlights the list it would join (notes over the note
+  list, todos anywhere else on the card) and promotes on release. Escape or a
+  release elsewhere cancels; the deleted-board archive takes no drops.
+- Tests: drops onto the todo list, the note list, and the title bar; drops on
+  empty canvas, the feed itself, the archive, and after Escape send nothing.
+- Desktop: dragged a feed item over a board's notes (list highlighted, ghost
+  under the pointer) and released; the service holds the new note with its
+  source reference.
+- Known: pressing a handle raises the feed card, which can cover part of an
+  overlapping board card during the drag.
+
 ## Suggested next
 
-Drag-to-promote (§6.3: drag a feed item onto a board card) and quick open
-(Ctrl+K). Board editing may want polish after real use.
+Quick open (Ctrl+K). Feed items could reorder by the same handle (§6.2).

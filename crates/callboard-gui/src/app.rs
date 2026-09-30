@@ -1968,7 +1968,7 @@ impl App {
                 archived.as_ref(),
                 &self.cache.boards,
                 salt,
-                wheel(scroll),
+                scroll,
                 actions,
             ),
         }
@@ -2282,7 +2282,26 @@ fn show_feed(
                 }
                 ui.group(|ui| {
                     ui.set_width(ui.available_width());
-                    ui.strong(&item.title);
+                    ui.push_id(&item.key, |ui| {
+                        ui.horizontal(|ui| {
+                            let grip = board::handle(ui, "Drag onto a board to promote")
+                                .on_hover_text("Drag onto a board card to promote it");
+                            ui.strong(&item.title);
+                            if grip.dragged() {
+                                egui::DragAndDrop::set_payload(
+                                    ui.ctx(),
+                                    board::FeedDrag {
+                                        feed: feed.info.name.clone(),
+                                        key: item.key.clone(),
+                                        title: item.title.clone(),
+                                    },
+                                );
+                                if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                                    drag_ghost(ui.ctx(), pos, &item.title);
+                                }
+                            }
+                        });
+                    });
                     if let Some(state) = feed.view_state.get(&item.key).filter(|s| s.snoozed) {
                         ui.weak(snooze_text(state));
                     }

@@ -1553,3 +1553,95 @@ fn board_writes_refetch_on_success_and_report_failures() {
     ui.harness
         .get_by_label_contains("Could not change the todo: HTTP 404");
 }
+
+/// Feed "a" and Inbox side by side, so neither covers the other.
+fn side_by_side() -> Ui {
+    let layout = serde_json::from_value(json!({
+        "view": {"x": 0, "y": 0},
+        "cards": [
+            {"target": {"kind": "feed", "name": "a"},
+             "x": 10, "y": 10, "width": 400, "height": 500, "collapsed": false},
+            {"target": {"kind": "board", "id": 2},
+             "x": 430, "y": 10, "width": 420, "height": 600, "collapsed": false},
+        ],
+    }))
+    .unwrap();
+    let ui = Ui::with(Saved {
+        layouts: vec![NamedLayout {
+            name: "Day".into(),
+            layout,
+            updated_at_ms: 0,
+        }],
+        ..Saved::default()
+    });
+    ui.ops();
+    ui
+}
+
+fn promote(kind: PromoteKind) -> WriteOp {
+    WriteOp::Promote {
+        feed: "a".into(),
+        key: "1".into(),
+        board_id: 2,
+        kind,
+    }
+}
+
+#[test]
+fn dragging_a_feed_item_onto_a_board_promotes_it_into_the_list_under_it() {
+    let mut ui = side_by_side();
+    let grip = ui
+        .harness
+        .get_by_label("Drag onto a board to promote")
+        .rect()
+        .center();
+    let todos = ui.harness.get_by_label("Todos").rect().center();
+    let notes = ui.harness.get_by_label("Notes").rect().center();
+    ui.drag(grip, todos);
+    assert_eq!(ui.ops(), [promote(PromoteKind::Todo)]);
+    ui.drag(grip, notes);
+    assert_eq!(ui.ops(), [promote(PromoteKind::Note)]);
+    // The board's title bar counts as the card: a todo.
+    ui.drag(grip, ui.title_bar(&Target::Board(2)));
+    assert_eq!(ui.ops(), [promote(PromoteKind::Todo)]);
+}
+
+#[test]
+fn a_feed_item_dropped_off_a_board_or_cancelled_promotes_nothing() {
+    let mut ui = side_by_side();
+    let grip = ui
+        .harness
+        .get_by_label("Drag onto a board to promote")
+        .rect()
+        .center();
+    ui.drag(grip, ui.empty_canvas());
+    ui.drag(grip, grip + Vec2::new(40.0, 60.0));
+    assert!(ui.ops().is_empty());
+    // Escape mid-drag cancels even over the board.
+    let todos = ui.harness.get_by_label("Todos").rect().center();
+    ui.harness.hover_at(grip);
+    ui.harness.step();
+    ui.press(grip, true);
+    ui.harness.step();
+    for step in 1..=8 {
+        ui.harness
+            .hover_at(grip + (todos - grip) * (step as f32 / 8.0));
+        ui.harness.step();
+    }
+    ui.harness.key_press(egui::Key::Escape);
+    ui.press(todos, false);
+    ui.settle();
+    assert!(ui.ops().is_empty());
+    // The deleted-board archive takes no drops.
+    ui.harness.get_by_label("Deleted-board archive").click();
+    ui.settle();
+    assert_eq!(ui.order().last(), Some(&Target::Archive), "in front");
+    let drop = ui.card(&Target::Archive).center();
+    ui.drag(grip, drop);
+    assert!(
+        ui.ops()
+            .iter()
+            .all(|op| !matches!(op, WriteOp::Promote { .. })),
+        "no promotion"
+    );
+}

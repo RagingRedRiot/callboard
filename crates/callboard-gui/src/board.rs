@@ -1,7 +1,7 @@
 //! Board cards: todos, notes, and the writes that edit them (DESIGN.md §6.3).
 use crate::{
     app::{Action, DeleteSubject, PromptKind, WriteOp},
-    backend::Target,
+    backend::{PromoteKind, Target},
 };
 use callboard_core::store::{
     BoardContents, BoardItem, BoardSummary, Note, ResolvedReference, Todo,
@@ -144,6 +144,14 @@ impl BoardOp {
             BoardOp::DeleteItem { kind, .. } => format!("Could not delete the {}", kind.noun()),
         }
     }
+}
+
+/// A feed item being dragged toward a board card (DESIGN.md §6.3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeedDrag {
+    pub feed: String,
+    pub key: String,
+    pub title: String,
 }
 
 fn write(op: BoardOp) -> Action {
@@ -297,7 +305,8 @@ impl Card<'_> {
 }
 
 /// Draw a board card's body: a user board (`archived` holds its archived
-/// items) or the deleted-board archive. `wheel` is the scroll multiplier.
+/// items) or the deleted-board archive. `topmost` says the card is the top
+/// one under the pointer: it scrolls with the wheel and takes drops.
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
@@ -306,7 +315,7 @@ pub fn show(
     archived: Option<&BoardContents>,
     boards: &[BoardSummary],
     salt: egui::Id,
-    wheel: egui::Vec2,
+    topmost: bool,
     actions: &mut Vec<Action>,
 ) {
     let card = Card {
@@ -365,7 +374,7 @@ pub fn show(
     egui::ScrollArea::vertical()
         .id_salt(salt.with("board_items"))
         .auto_shrink([false, false])
-        .wheel_scroll_multiplier(wheel)
+        .wheel_scroll_multiplier(egui::Vec2::splat(if topmost { 1.0 } else { 0.0 }))
         .show(ui, |ui| {
             if card.archive() {
                 ui.weak("Items from deleted boards. Restore one to a board, or delete it.");
@@ -376,15 +385,20 @@ pub fn show(
                 return;
             }
             // Notes beside the todos when there is room for both.
-            if ui.available_width() >= 600.0 {
+            let (todo_list, note_list) = if ui.available_width() >= 600.0 {
                 ui.columns(2, |columns| {
-                    todos(&mut columns[0], &card, &items.todos, actions);
-                    notes(&mut columns[1], &card, &items.notes, actions);
-                });
+                    (
+                        todos(&mut columns[0], &card, &items.todos, actions),
+                        notes(&mut columns[1], &card, &items.notes, actions),
+                    )
+                })
             } else {
-                todos(ui, &card, &items.todos, actions);
+                let todo_list = todos(ui, &card, &items.todos, actions);
                 ui.add_space(8.0);
-                notes(ui, &card, &items.notes, actions);
+                (todo_list, notes(ui, &card, &items.notes, actions))
+            };
+            if topmost {
+                promote_drop(ui, &card, todo_list, note_list, actions);
             }
             if let Some(archived) = archived {
                 ui.add_space(8.0);
@@ -444,7 +458,19 @@ fn add_field(ui: &mut egui::Ui, card: &Card, kind: Kind, actions: &mut Vec<Actio
     card.memory.set(ui, key, (!text.is_empty()).then_some(text));
 }
 
-fn todos(ui: &mut egui::Ui, card: &Card, todos: &[BoardItem<Todo>], actions: &mut Vec<Action>) {
+/// The todo list; returns its area.
+fn todos(
+    ui: &mut egui::Ui,
+    card: &Card,
+    todos: &[BoardItem<Todo>],
+    actions: &mut Vec<Action>,
+) -> egui::Rect {
+    ui.scope(|ui| todo_list(ui, card, todos, actions))
+        .response
+        .rect
+}
+
+fn todo_list(ui: &mut egui::Ui, card: &Card, todos: &[BoardItem<Todo>], actions: &mut Vec<Action>) {
     ui.strong("Todos");
     add_field(ui, card, Kind::Todo, actions);
     if todos.is_empty() {
@@ -491,7 +517,19 @@ fn todos(ui: &mut egui::Ui, card: &Card, todos: &[BoardItem<Todo>], actions: &mu
     );
 }
 
-fn notes(ui: &mut egui::Ui, card: &Card, notes: &[BoardItem<Note>], actions: &mut Vec<Action>) {
+/// The note list; returns its area.
+fn notes(
+    ui: &mut egui::Ui,
+    card: &Card,
+    notes: &[BoardItem<Note>],
+    actions: &mut Vec<Action>,
+) -> egui::Rect {
+    ui.scope(|ui| note_list(ui, card, notes, actions))
+        .response
+        .rect
+}
+
+fn note_list(ui: &mut egui::Ui, card: &Card, notes: &[BoardItem<Note>], actions: &mut Vec<Action>) {
     ui.strong("Notes");
     add_field(ui, card, Kind::Note, actions);
     if notes.is_empty() {
@@ -551,7 +589,7 @@ fn item_row(
     actions: &mut Vec<Action>,
 ) -> egui::Response {
     ui.horizontal_top(|ui| {
-        let grip = handle(ui);
+        let grip = handle(ui, "Drag to reorder");
         const MENU: f32 = 28.0;
         let width = (ui.available_width() - MENU).max(40.0);
         ui.allocate_ui_with_layout(
@@ -596,8 +634,46 @@ fn details<T>(ui: &mut egui::Ui, body: Option<&str>, url: Option<&str>, item: &B
     }
 }
 
-/// The drag handle at an item's left: six dots.
-fn handle(ui: &mut egui::Ui) -> egui::Response {
+/// While a feed item is dragged over this card: highlight the list it would
+/// join (notes over the note list, todos anywhere else), and promote it there
+/// on release.
+fn promote_drop(
+    ui: &mut egui::Ui,
+    card: &Card,
+    todos: egui::Rect,
+    notes: egui::Rect,
+    actions: &mut Vec<Action>,
+) {
+    let Some(drag) = egui::DragAndDrop::payload::<FeedDrag>(ui.ctx()) else {
+        return;
+    };
+    let Some(pointer) = ui.ctx().pointer_interact_pos() else {
+        return;
+    };
+    let (kind, list) = if notes.contains(pointer) {
+        (PromoteKind::Note, notes)
+    } else {
+        (PromoteKind::Todo, todos)
+    };
+    let selection = ui.visuals().selection;
+    let shown = list.expand(3.0).intersect(ui.clip_rect());
+    ui.painter()
+        .rect_filled(shown, 4.0, selection.bg_fill.gamma_multiply(0.2));
+    ui.painter()
+        .rect_stroke(shown, 4.0, selection.stroke, egui::StrokeKind::Inside);
+    if ui.input(|i| i.pointer.any_released()) {
+        egui::DragAndDrop::clear_payload(ui.ctx());
+        actions.push(Action::Write(WriteOp::Promote {
+            feed: drag.feed.clone(),
+            key: drag.key.clone(),
+            board_id: card.board,
+            kind,
+        }));
+    }
+}
+
+/// A drag handle: six dots. `label` names what dragging it does.
+pub(crate) fn handle(ui: &mut egui::Ui, label: &'static str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(10.0, 16.0), egui::Sense::drag());
     let color = if response.hovered() || response.dragged() {
         ui.visuals().strong_text_color()
@@ -615,9 +691,7 @@ fn handle(ui: &mut egui::Ui) -> egui::Response {
         ui.painter()
             .circle_filled(rect.min + egui::vec2(x, y), 1.2, color);
     }
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Other, true, "Drag to reorder")
-    });
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, label));
     response.on_hover_cursor(egui::CursorIcon::Grab)
 }
 

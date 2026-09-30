@@ -202,7 +202,9 @@ the dotted handle at an item's left to reorder it. **Show archived** lists
 archived items with **Restore**. The **Board** menu renames the board,
 archives its done todos, or deletes it (its items move to the deleted-board
 archive, whose card restores them to a chosen board). **New board…** in the
-sidebar creates a board and places its card.
+sidebar creates a board and places its card. Drag a feed item by its dotted
+handle onto a board card to promote it: over the notes it becomes a note,
+anywhere else on the card a todo (Escape cancels).
 
 Graphics dependencies are confined to the GUI
 crate; building `callboard` alone does not build eframe. A Wayland or X11 desktop

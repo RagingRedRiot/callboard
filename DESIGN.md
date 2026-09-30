@@ -290,7 +290,10 @@ to the service at once; the card refetches and shows what was stored.
 The deleted-board archive card lists its items with the board each came from,
 **Restore to** a chosen board, and **Delete…**.
 
-Dragging a feed item onto a board card promotes it (§5.3).
+Dragging a feed item by its handle onto a board card promotes it (§5.3): over
+the notes it becomes a note, anywhere else on the card a todo. The list it
+will join is highlighted while the item is over it; releasing elsewhere, or
+pressing Escape, cancels. The deleted-board archive card accepts no drops.
 
 ### 6.4 Layouts
 
