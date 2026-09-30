@@ -614,6 +614,31 @@ a matching service.
   and Snooze/Promote on each visible item. Menus were not opened by hand: no
   Wayland input tool is installed, so interaction relies on the kittest tests.
 
+### Session 21, part 3: desktop click-through
+
+Drove the real window with an absolute-position virtual pointer and keyboard
+(uinput via python-evdev; ydotool 0.1.8 only moves relatively, which pointer
+acceleration distorts) and checked each step with `cosmic-screenshot` against
+an isolated seeded service. Snooze (menu, timed, until changed), Show snoozed,
+Unsnooze, Promote (board submenu, as note), Rename (refusal and success,
+preference following), Delete (cancel and confirm, switching layouts and
+preference), New layout, Add panel (tab, split right, disabled "focused
+panel"), the sidebar context menu, and Show… retargeting all worked, with the
+service state confirmed over the socket after each write. Fixed what it found:
+
+- The layout-name field now has focus whenever the dialog is open, including
+  a prefilled rename (with the name selected, so typing replaces it) and after
+  Enter submits a refused name. The Enter check runs before refocusing,
+  because `lost_focus()` reflects the current focus.
+- Snoozed items say when they wake ("wakes in 1h", "… or when it changes",
+  "until it changes"), to the two largest units.
+- A note with an empty body no longer shows a blank line; the board summary
+  says "1 note".
+- Remaining: disabled todo checkboxes dim their titles; left for board editing.
+
+Tests: snooze and plural text, and an interaction test that renames by typing
+alone, through a refusal. Full local workflow passed.
+
 ## Suggested next
 
 Board editing in the GUI (complete todos, edit, archive, reorder), then

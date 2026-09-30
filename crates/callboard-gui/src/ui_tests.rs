@@ -723,3 +723,36 @@ fn promoting_an_item_names_the_board_and_kind_and_reports_failure() {
             .is_none()
     );
 }
+
+/// Type as a keyboard would, into whatever has focus.
+fn type_keys(ui: &mut Ui, text: &str) {
+    ui.harness
+        .input_mut()
+        .events
+        .push(egui::Event::Text(text.into()));
+    ui.harness.step();
+}
+
+#[test]
+fn rename_typing_replaces_the_selected_name_and_refusals_keep_focus() {
+    let mut ui = Ui::new();
+    ui.ops();
+    ui.harness.get_by_label("Rename…").click();
+    ui.settle();
+    // No click into the field: it has focus with "Day" selected.
+    type_keys(&mut ui, "Ops");
+    ui.harness.key_press(egui::Key::Enter);
+    ui.settle();
+    ui.harness.get_by_label_contains("already exists");
+    // Still focused after the refusal: keep typing.
+    type_keys(&mut ui, "2");
+    ui.harness.key_press(egui::Key::Enter);
+    ui.settle();
+    assert_eq!(
+        ui.ops(),
+        [WriteOp::Rename {
+            from: "Day".into(),
+            to: "Ops2".into(),
+        }]
+    );
+}

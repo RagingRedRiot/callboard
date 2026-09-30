@@ -10,7 +10,9 @@ use crate::{
 use callboard::lifecycle::Paths;
 use callboard_core::{
     layout::{NamedLayout, Panel},
-    store::{BoardContents, BoardSummary, Feed, FeedInfo, FeedSummary, ResolvedReference},
+    store::{
+        BoardContents, BoardSummary, Feed, FeedInfo, FeedSummary, ItemViewState, ResolvedReference,
+    },
 };
 use eframe::egui;
 use egui_tiles::{Behavior, TileId, Tiles, UiResponse};
@@ -291,6 +293,8 @@ pub struct NamePrompt {
     pub error: Option<String>,
     /// Submitted; waiting for the service to store it.
     pub waiting: bool,
+    /// Select the whole name on the next frame, so typing replaces it.
+    pub select_all: bool,
 }
 
 pub struct App {
@@ -821,6 +825,7 @@ impl App {
                     text,
                     error: None,
                     waiting: false,
+                    select_all: true,
                 })
             }
             Action::ConfirmDelete => {
@@ -1106,16 +1111,27 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .show(ui.ctx(), |ui| {
                 let label = ui.label("Layout name");
-                let edit = ui.add_enabled(
-                    !prompt.waiting,
-                    egui::TextEdit::singleline(&mut prompt.text).desired_width(260.0),
-                );
-                let edit = edit.labelled_by(label.id);
-                if !prompt.waiting && !edit.has_focus() && prompt.text.is_empty() {
-                    edit.request_focus();
+                let mut output = ui
+                    .add_enabled_ui(!prompt.waiting, |ui| {
+                        egui::TextEdit::singleline(&mut prompt.text)
+                            .desired_width(260.0)
+                            .show(ui)
+                    })
+                    .inner;
+                if std::mem::take(&mut prompt.select_all) {
+                    let all = egui::text_selection::CCursorRange::select_all(&output.galley);
+                    output.state.cursor.set_char_range(Some(all));
+                    output.state.store(ui.ctx(), output.response.response.id);
                 }
+                let edit = output.response.response.clone().labelled_by(label.id);
+                // Read before refocusing: lost_focus() reflects focus now.
                 if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     submit = true;
+                }
+                // Keep typing in the field: on open (including a prefilled
+                // rename), and after Enter submits a name that is refused.
+                if !prompt.waiting && !edit.has_focus() {
+                    edit.request_focus();
                 }
                 if let Some(error) = &prompt.error {
                     ui.colored_label(ui.visuals().error_fg_color, error);
@@ -1684,6 +1700,29 @@ fn reference(ui: &mut egui::Ui, resolved: Option<&ResolvedReference>) {
     }
 }
 
+/// When a snoozed item wakes (DESIGN.md §4.1: whichever condition comes first).
+fn snooze_text(state: &ItemViewState) -> String {
+    let until = state.snoozed_until_ms.map(|at| {
+        // Whole minutes, rounded up: "wakes in 1h", not "59m 59s".
+        let left_ms = at.saturating_sub(now_ms()).max(0) as u64;
+        let left = Duration::from_secs(left_ms.div_ceil(60_000) * 60);
+        // The two largest units are precise enough: "3days 4h", not "… 12m".
+        let text = humantime::format_duration(left).to_string();
+        let coarse: Vec<&str> = text.split(' ').take(2).collect();
+        format!("wakes in {}", coarse.join(" "))
+    });
+    match (until, state.wake_on_update) {
+        (Some(until), true) => format!("Snoozed · {until} or when it changes"),
+        (Some(until), false) => format!("Snoozed · {until}"),
+        (None, _) => "Snoozed until it changes".into(),
+    }
+}
+
+/// "1 note", "2 notes".
+fn count(n: usize, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+}
+
 /// Snooze choices: label and duration.
 const SNOOZE_FOR: [(&str, Duration); 4] = [
     ("For 1 hour", Duration::from_secs(60 * 60)),
@@ -1806,8 +1845,8 @@ fn show_feed(
                 ui.group(|ui| {
                     ui.set_width(ui.available_width());
                     ui.strong(&item.title);
-                    if snoozed {
-                        ui.weak("Snoozed");
+                    if let Some(state) = feed.view_state.get(&item.key).filter(|s| s.snoozed) {
+                        ui.weak(snooze_text(state));
                     }
                     if let Some(body) = &item.body {
                         ui.label(body);
@@ -1827,9 +1866,9 @@ fn show_feed(
 fn show_board(ui: &mut egui::Ui, board: &BoardContents, salt: egui::Id) {
     let open = board.todos.iter().filter(|t| !t.item.done).count();
     ui.label(format!(
-        "{} todos ({open} open) · {} notes",
-        board.todos.len(),
-        board.notes.len()
+        "{} ({open} open) · {}",
+        count(board.todos.len(), "todo"),
+        count(board.notes.len(), "note")
     ));
     egui::ScrollArea::vertical()
         .id_salt(salt.with("board_items"))
@@ -1861,7 +1900,9 @@ fn show_board(ui: &mut egui::Ui, board: &BoardContents, salt: egui::Id) {
                     if let Some(title) = &note.item.title {
                         ui.strong(title);
                     }
-                    ui.label(&note.item.body);
+                    if !note.item.body.is_empty() {
+                        ui.label(&note.item.body);
+                    }
                     link(ui, note.item.url.as_deref());
                     reference(ui, note.resolved_reference.as_ref());
                 });
@@ -1957,6 +1998,32 @@ mod tests {
         fn request(&self) -> Request {
             self.requests.try_recv().expect("a fetch request")
         }
+    }
+
+    #[test]
+    fn snooze_text_names_the_wake_condition() {
+        let hour = now_ms() + 60 * 60 * 1000;
+        let state = |until: Option<i64>, on_update| ItemViewState {
+            snoozed_until_ms: until,
+            wake_on_update: on_update,
+            snoozed: true,
+        };
+        assert_eq!(
+            snooze_text(&state(Some(hour), false)),
+            "Snoozed · wakes in 1h"
+        );
+        assert_eq!(
+            snooze_text(&state(Some(hour), true)),
+            "Snoozed · wakes in 1h or when it changes"
+        );
+        assert_eq!(snooze_text(&state(None, true)), "Snoozed until it changes");
+        let later = now_ms() + ((3 * 24 + 4) * 60 + 12) * 60 * 1000 + 30_000;
+        assert_eq!(
+            snooze_text(&state(Some(later), false)),
+            "Snoozed · wakes in 3days 4h"
+        );
+        assert_eq!(count(1, "note"), "1 note");
+        assert_eq!(count(0, "todo"), "0 todos");
     }
 
     #[test]
