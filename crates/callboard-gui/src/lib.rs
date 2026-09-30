@@ -1,6 +1,8 @@
-//! Desktop frontend and service connection helpers. Only layouts are written.
+//! Desktop frontend and service connection helpers.
 pub mod app;
 pub mod backend;
+/// Phase 0 canvas prototype (docs/canvas-plan.md); removed in Phase 3.
+pub mod canvas_proto;
 pub mod events;
 pub mod sync;
 #[cfg(test)]

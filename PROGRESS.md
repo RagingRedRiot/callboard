@@ -639,6 +639,41 @@ service state confirmed over the socket after each write. Fixed what it found:
 Tests: snooze and plural text, and an interaction test that renames by typing
 alone, through a refusal. Full local workflow passed.
 
+## Canvas Phase 0: rendering prototype
+
+`callboard-gui/src/canvas_proto.rs` (run with `cargo run -p callboard-gui
+--example canvas_proto`; removed in Phase 3) draws three overlapping cards on a
+pannable canvas beside a sidebar. All five gate checks passed in
+`egui_kittest` (7 tests) and on the desktop, driven by the absolute uinput
+pointer with screenshots: overlap and click-to-front, clipping to the canvas,
+title-bar move, corner/edge resize with a minimum, collapse, wheel scrolling a
+card versus panning empty canvas (vertical, horizontal wheel, Shift + wheel),
+and empty-canvas drag panning.
+
+Chosen approach: the GUI draws cards itself; `egui::Window` is not needed.
+
+- Each card is a child `Ui` at its screen rect (canvas rect offset by the
+  view), clipped to card ∩ canvas, drawn back to front. egui's hit-testing
+  honours the clip rect, so cards panned under the sidebar never take its
+  clicks.
+- Registration order is the stacking order: the canvas background first, then
+  per card a full-card blocker widget, the title-bar drag area, its buttons,
+  the body, and last the resize grips. The blocker stops lower cards from
+  reacting through upper ones.
+- Raising reads primary presses from the frame's input events. On the real
+  desktop a quick click delivered press and release in one frame, and
+  `press_origin()` was already cleared, so the first version never raised;
+  kittest did not show this until a test sent both events in one frame.
+- Wheel routing: only the topmost card under the pointer keeps a wheel
+  multiplier of 1 (`ScrollArea` has no on/off switch in 0.36; with 0 a covered
+  card neither scrolls nor consumes the delta). Leftover `smooth_scroll_delta`
+  over empty canvas pans.
+
+For Phase 3: resize grips are invisible (only the cursor changes) and need a
+visible corner mark; the front or focused card needs a highlight; the title
+bar needs its own background. Test clicks must use positions from current
+geometry — a pan or resize moves every later target.
+
 ## Suggested next
 
 Canvas GUI: DESIGN.md §6 now specifies a pannable canvas of overlapping,
