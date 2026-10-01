@@ -3,6 +3,7 @@ pub mod app;
 pub mod backend;
 pub mod board;
 pub mod events;
+pub mod feed;
 pub mod quick;
 pub mod sync;
 #[cfg(test)]
