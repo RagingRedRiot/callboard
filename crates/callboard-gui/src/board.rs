@@ -719,14 +719,29 @@ fn reorderable<T>(
             dragging = Some((i, grip));
         }
     }
-    let Some((from, grip)) = dragging else {
-        return;
-    };
-    let Some(pointer) = ui.ctx().pointer_interact_pos() else {
-        return;
-    };
+    if let Some((from, grip)) = dragging
+        && let Some(to) = reorder_drop(ui, &rects, from, &grip)
+    {
+        actions.push(card.patch(kind, id_of(&items[from]), json!({ "position": to })));
+    }
+}
+
+/// While `grip` drags row `from` of a list whose rows are `rects`: show where
+/// it would go and, when released within the list's visible area at a new
+/// place, return its new index among the rows. Released elsewhere (a board
+/// card, say), it stays put.
+pub(crate) fn reorder_drop(
+    ui: &egui::Ui,
+    rects: &[egui::Rect],
+    from: usize,
+    grip: &egui::Response,
+) -> Option<usize> {
+    let pointer = ui.ctx().pointer_interact_pos()?;
+    if !ui.clip_rect().contains(pointer) {
+        return None;
+    }
     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-    // The new position counts the other rows above the pointer.
+    // The new index counts the other rows above the pointer.
     let others: Vec<egui::Rect> = rects
         .iter()
         .enumerate()
@@ -743,11 +758,9 @@ fn reorderable<T>(
         (None, Some(below)) => below.top() - 2.0,
         (None, None) => rects[from].top(),
     };
-    let x = rects[from].x_range();
-    ui.painter().hline(x, y, ui.visuals().selection.stroke);
-    if grip.drag_stopped() && to != from {
-        actions.push(card.patch(kind, id_of(&items[from]), json!({ "position": to })));
-    }
+    ui.painter()
+        .hline(rects[from].x_range(), y, ui.visuals().selection.stroke);
+    (grip.drag_stopped() && to != from).then_some(to)
 }
 
 /// Edit, move, archive, or delete an active item.

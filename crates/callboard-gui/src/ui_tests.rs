@@ -177,7 +177,8 @@ fn answer(request: Request, saved: &Saved) -> Fetched {
                         serde_json::from_value::<Item>(json!({"key":"1","title":"Item"})).unwrap(),
                         serde_json::from_value::<Item>(json!({"key":"2","title":"Later"})).unwrap(),
                     ],
-                    manual_order: false,
+                    // Feed "b" has been reordered by hand.
+                    manual_order: name == "b",
                     view_state: [(
                         "2".to_owned(),
                         ItemViewState {
@@ -1592,7 +1593,7 @@ fn dragging_a_feed_item_onto_a_board_promotes_it_into_the_list_under_it() {
     let mut ui = side_by_side();
     let grip = ui
         .harness
-        .get_by_label("Drag onto a board to promote")
+        .get_by_label("Drag to reorder or promote")
         .rect()
         .center();
     let todos = ui.harness.get_by_label("Todos").rect().center();
@@ -1611,7 +1612,7 @@ fn a_feed_item_dropped_off_a_board_or_cancelled_promotes_nothing() {
     let mut ui = side_by_side();
     let grip = ui
         .harness
-        .get_by_label("Drag onto a board to promote")
+        .get_by_label("Drag to reorder or promote")
         .rect()
         .center();
     ui.drag(grip, ui.empty_canvas());
@@ -1725,4 +1726,49 @@ fn quick_open_closes_on_escape_or_a_click_outside_and_says_when_nothing_matches(
     ui.harness.get_by_label("Open a feed, board, or layout");
     ui.click_at(ui.empty_canvas());
     assert!(ui.quick_open_is_closed());
+}
+
+// Feed item reordering (DESIGN.md §6.2).
+
+#[test]
+fn dragging_a_feed_item_within_its_feed_moves_it() {
+    let mut ui = side_by_side();
+    ui.harness.get_by_label("Show snoozed (1)").click();
+    ui.settle();
+    let handles: Vec<Pos2> = ui
+        .harness
+        .query_all_by_label("Drag to reorder or promote")
+        .map(|n| n.rect().center())
+        .collect();
+    assert_eq!(handles.len(), 2);
+    ui.drag(handles[0], handles[1] + Vec2::new(0.0, 40.0));
+    assert_eq!(
+        ui.ops(),
+        [WriteOp::Reorder {
+            feed: "a".into(),
+            key: "1".into(),
+            position: 1,
+        }]
+    );
+    // Released where it started: nothing is sent, and no promotion either.
+    ui.drag(handles[1], handles[1] + Vec2::new(0.0, 4.0));
+    assert!(ui.ops().is_empty());
+}
+
+#[test]
+fn reset_order_shows_only_for_a_manually_ordered_feed() {
+    let mut ui = Ui::new();
+    assert!(ui.harness.query_by_label("Reset order").is_none());
+    ui.harness.get_by_label("b title").click();
+    ui.settle();
+    ui.ops();
+    ui.harness.get_by_label("Reset order").click();
+    ui.settle();
+    assert_eq!(
+        ui.ops(),
+        [WriteOp::ResetOrder {
+            feed: "b".into(),
+            key: "1".into(),
+        }]
+    );
 }

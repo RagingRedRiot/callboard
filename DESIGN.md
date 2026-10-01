@@ -269,6 +269,12 @@ error or stale marker, then its visible items in display order (§4.2). Item
 actions: open link, snooze, drag to reorder, promote to todo or note, reveal
 snoozed.
 
+Each item has a drag handle. Released within its own feed's list, the item
+moves there (giving the feed a manual order, §4.2); released on a board card,
+it is promoted (§6.3). Snoozed items keep their places when hidden: a drop
+between two shown items puts it just after the upper one. **Reset order**,
+shown while the feed has a manual order, returns it to the tool's order.
+
 ### 6.3 Board cards
 
 A board card shows the board's todos as a checklist and its notes as sticky

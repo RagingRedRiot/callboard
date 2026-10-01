@@ -797,7 +797,23 @@ complete, so this is GUI-only (new `board.rs`).
   Enter revealed the card. Fixed from that: entries are left-aligned, and the
   hint says Up/Down (egui's fonts lack ↑↓).
 
+## Feed item reordering
+
+- DESIGN.md §6.2 specifies it. The feed item handle now does both: released
+  within its own feed's list it reorders (`WriteOp::Reorder`, `PATCH
+  .../items/{key}` with `position`); released on a board card it promotes.
+  The insertion line and drop logic are shared with board lists
+  (`board::reorder_drop`), which now also cancel a reorder released outside
+  the list. Hidden snoozed items keep their places: a drop goes just after
+  the shown item above it (`feed_position`). **Reset order** appears while
+  the feed has a manual order (`reset_order: true`).
+- Tests: position mapping with hidden items, a drag within a feed, a drop in
+  place sending nothing, Reset order shown only for manual order, and the
+  reorder/reset bodies against the real service.
+- Desktop check not done: `cosmic-screenshot` timed out (the portal
+  likely wanted approval while the user was away).
+
 ## Suggested next
 
-Feed items could reorder by their drag handle (§6.2). Otherwise, polish from
-real use of board editing, drag-to-promote, and quick open.
+Polish from real use of board editing, drag-to-promote, quick open, and feed
+reordering; click through feed reordering on the desktop.

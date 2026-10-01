@@ -269,6 +269,17 @@ pub enum WriteOp {
         board_id: i64,
         kind: PromoteKind,
     },
+    /// Move an item to `position` in the feed's whole order (§4.2).
+    Reorder {
+        feed: String,
+        key: String,
+        position: usize,
+    },
+    /// Return the feed to the tool's order; `key` is any of its items.
+    ResetOrder {
+        feed: String,
+        key: String,
+    },
     Board(BoardOp),
 }
 
@@ -484,6 +495,22 @@ impl App {
                             } => backend::promote(paths, auto, feed, key, *board_id, *kind)
                                 .await
                                 .map(|_| Reply::Done),
+                            WriteOp::Reorder {
+                                feed,
+                                key,
+                                position,
+                            } => {
+                                let patch = serde_json::json!({ "position": position });
+                                backend::patch_feed_item(paths, auto, feed, key, &patch)
+                                    .await
+                                    .map(|_| Reply::Done)
+                            }
+                            WriteOp::ResetOrder { feed, key } => {
+                                let patch = serde_json::json!({ "reset_order": true });
+                                backend::patch_feed_item(paths, auto, feed, key, &patch)
+                                    .await
+                                    .map(|_| Reply::Done)
+                            }
                             WriteOp::Board(op) => {
                                 let mut reply = Reply::Done;
                                 for (method, resource, body) in op.requests() {
@@ -718,7 +745,15 @@ impl App {
             (WriteOp::Remember { .. }, _) => (),
             // The change notice also triggers these refetches; asking directly
             // keeps the card current while the event stream is down.
-            (WriteOp::Snooze { feed, .. }, Ok(_)) => self.scheduler.want(Target::Feed(feed)),
+            (
+                WriteOp::Snooze { feed, .. }
+                | WriteOp::Reorder { feed, .. }
+                | WriteOp::ResetOrder { feed, .. },
+                Ok(_),
+            ) => self.scheduler.want(Target::Feed(feed)),
+            (WriteOp::Reorder { .. } | WriteOp::ResetOrder { .. }, Err(error)) => {
+                self.write_error = Some(format!("Could not reorder the feed: {error}"));
+            }
             (WriteOp::Promote { board_id, .. }, Ok(_)) => {
                 self.scheduler.want(Target::Board(board_id))
             }
@@ -2325,12 +2360,26 @@ fn show_feed(
         .count();
     let toggle = salt.with("show_snoozed");
     let mut show_snoozed = ui.data(|d| d.get_temp::<bool>(toggle)).unwrap_or(false);
-    if ui
-        .checkbox(&mut show_snoozed, format!("Show snoozed ({snoozed})"))
-        .changed()
-    {
-        ui.data_mut(|d| d.insert_temp(toggle, show_snoozed));
-    }
+    ui.horizontal(|ui| {
+        if ui
+            .checkbox(&mut show_snoozed, format!("Show snoozed ({snoozed})"))
+            .changed()
+        {
+            ui.data_mut(|d| d.insert_temp(toggle, show_snoozed));
+        }
+        if feed.manual_order
+            && let Some(first) = feed.items.first()
+            && ui
+                .small_button("Reset order")
+                .on_hover_text("Return to the order the feed submits")
+                .clicked()
+        {
+            actions.push(Action::Write(WriteOp::ResetOrder {
+                feed: feed.info.name.clone(),
+                key: first.key.clone(),
+            }));
+        }
+    });
     egui::ScrollArea::vertical()
         .id_salt(salt.with("feed_items"))
         .auto_shrink([false, false])
@@ -2339,19 +2388,26 @@ fn show_feed(
             if feed.items.is_empty() {
                 ui.label("This feed is empty.");
             }
+            // Shown items: their keys, rows, and the handle being dragged.
+            let mut shown: Vec<&str> = Vec::new();
+            let mut rects = Vec::new();
+            let mut dragging = None;
             for item in &feed.items {
                 let snoozed = feed.view_state.get(&item.key).is_some_and(|s| s.snoozed);
                 if snoozed && !show_snoozed {
                     continue;
                 }
-                ui.group(|ui| {
+                let mut grip = None;
+                let row = ui.group(|ui| {
                     ui.set_width(ui.available_width());
                     ui.push_id(&item.key, |ui| {
                         ui.horizontal(|ui| {
-                            let grip = board::handle(ui, "Drag onto a board to promote")
-                                .on_hover_text("Drag onto a board card to promote it");
+                            let handle = board::handle(ui, "Drag to reorder or promote")
+                                .on_hover_text(
+                                    "Drag within the feed to reorder, or onto a board card to promote",
+                                );
                             ui.strong(&item.title);
-                            if grip.dragged() {
+                            if handle.dragged() {
                                 egui::DragAndDrop::set_payload(
                                     ui.ctx(),
                                     board::FeedDrag {
@@ -2364,6 +2420,7 @@ fn show_feed(
                                     drag_ghost(ui.ctx(), pos, &item.title);
                                 }
                             }
+                            grip = Some(handle);
                         });
                     });
                     if let Some(state) = feed.view_state.get(&item.key).filter(|s| s.snoozed) {
@@ -2380,8 +2437,42 @@ fn show_feed(
                         item_actions(ui, &feed.info.name, &item.key, snoozed, boards, actions);
                     });
                 });
+                if let Some(grip) = grip
+                    && (grip.dragged() || grip.drag_stopped())
+                {
+                    dragging = Some((shown.len(), grip));
+                }
+                shown.push(&item.key);
+                rects.push(row.response.rect);
+            }
+            if let Some((from, grip)) = dragging
+                && let Some(to) = board::reorder_drop(ui, &rects, from, &grip)
+            {
+                // Dropped here, it is not a promotion.
+                egui::DragAndDrop::clear_payload(ui.ctx());
+                let all: Vec<&str> = feed.items.iter().map(|i| i.key.as_str()).collect();
+                let position = feed_position(&all, &shown, from, to);
+                actions.push(Action::Write(WriteOp::Reorder {
+                    feed: feed.info.name.clone(),
+                    key: shown[from].to_owned(),
+                    position,
+                }));
             }
         });
+}
+
+/// Where an item dropped at index `to` among the other shown items goes in
+/// the feed's whole order (`all`, which includes hidden snoozed items): just
+/// after the shown item above it, or before the first shown item.
+fn feed_position(all: &[&str], shown: &[&str], from: usize, to: usize) -> usize {
+    let moved = shown[from];
+    let rest: Vec<&str> = all.iter().copied().filter(|k| *k != moved).collect();
+    let others: Vec<&str> = shown.iter().copied().filter(|k| *k != moved).collect();
+    let index = |key: &str| rest.iter().position(|k| *k == key).unwrap_or(0);
+    match to.checked_sub(1).and_then(|i| others.get(i)) {
+        Some(above) => index(above) + 1,
+        None => others.first().map_or(0, |first| index(first)),
+    }
 }
 
 #[cfg(test)]
@@ -2481,6 +2572,24 @@ mod tests {
         fn request(&self) -> Request {
             self.requests.try_recv().expect("a fetch request")
         }
+    }
+
+    #[test]
+    fn a_drop_among_shown_items_maps_to_the_whole_order() {
+        // b is snoozed and hidden: shown a, c, d.
+        let all = ["a", "b", "c", "d"];
+        let shown = ["a", "c", "d"];
+        // d dropped first: before a.
+        assert_eq!(feed_position(&all, &shown, 2, 0), 0);
+        // a dropped below c: just after c, past the hidden b.
+        assert_eq!(feed_position(&all, &shown, 0, 1), 2);
+        // a dropped last.
+        assert_eq!(feed_position(&all, &shown, 0, 2), 3);
+        // d dropped between a and c: after a, before the hidden b.
+        assert_eq!(feed_position(&all, &shown, 2, 1), 1);
+        // With the first item hidden, a drop at the top lands before the
+        // first shown item and after the hidden one.
+        assert_eq!(feed_position(&["x", "y", "z"], &["y", "z"], 1, 0), 1);
     }
 
     #[test]

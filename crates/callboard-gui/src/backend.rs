@@ -653,6 +653,54 @@ mod tests {
         running.stop().await;
     }
 
+    /// The bodies the window sends to reorder a feed and reset its order.
+    #[tokio::test]
+    async fn reorders_a_feed_and_resets_its_order() {
+        let service = Service::new();
+        let running = service.start().await;
+        running
+            .send(
+                "PUT",
+                "/feeds/work",
+                json!({"items":[{"key":"a","title":"A"},{"key":"b","title":"B"},{"key":"c","title":"C"}]}),
+            )
+            .await;
+        let order = || async {
+            let request = Request {
+                lists: BTreeSet::new(),
+                targets: vec![Target::Feed("work".into())],
+            };
+            match fetch(&service.paths, None, &request).await.targets.pop() {
+                Some((_, Ok(Contents::Feed(feed)))) => (
+                    feed.items.into_iter().map(|i| i.key).collect::<Vec<_>>(),
+                    feed.manual_order,
+                ),
+                _ => panic!("feed not loaded"),
+            }
+        };
+        patch_feed_item(&service.paths, None, "work", "c", &json!({"position": 0}))
+            .await
+            .unwrap();
+        assert_eq!(
+            order().await,
+            (vec!["c".into(), "a".into(), "b".into()], true)
+        );
+        patch_feed_item(
+            &service.paths,
+            None,
+            "work",
+            "a",
+            &json!({"reset_order": true}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            order().await,
+            (vec!["a".into(), "b".into(), "c".into()], false)
+        );
+        running.stop().await;
+    }
+
     #[tokio::test]
     async fn snoozes_and_promotes_items_with_url_shaped_keys() {
         let service = Service::new();
