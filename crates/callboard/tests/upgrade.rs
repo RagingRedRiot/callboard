@@ -49,15 +49,27 @@ impl Deployment {
     /// Install a fresh copy of the real binary by rename, as `cargo install`
     /// does: a new inode at the same path.
     fn install_build(&self) {
-        let staged = self.root.path().join("bin/.callboard.new");
-        std::fs::copy(env!("CARGO_BIN_EXE_callboard"), &staged).unwrap();
-        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::rename(&staged, self.binary()).unwrap();
+        self.install(Path::new(env!("CARGO_BIN_EXE_callboard")));
     }
 
     fn install_script(&self, script: &str) {
+        let source = self.root.path().join("script.sh");
+        std::fs::write(&source, script).unwrap();
+        self.install(&source);
+    }
+
+    /// Copy `source` into place by rename. The copy runs in a `cp` process:
+    /// a write descriptor held here could leak into a child another test
+    /// thread is forking, and executing the file would then fail with
+    /// ETXTBSY until that child execs.
+    fn install(&self, source: &Path) {
         let staged = self.root.path().join("bin/.callboard.new");
-        std::fs::write(&staged, script).unwrap();
+        let copied = std::process::Command::new("cp")
+            .arg(source)
+            .arg(&staged)
+            .status()
+            .unwrap();
+        assert!(copied.success());
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::rename(&staged, self.binary()).unwrap();
     }
