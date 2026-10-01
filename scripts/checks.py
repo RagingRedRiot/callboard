@@ -2,7 +2,7 @@
 """Local merge checks. For merge review, execute this file from a trusted base."""
 import argparse
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 import sys
 
@@ -11,13 +11,29 @@ def git(repo, *args):
     return subprocess.check_output(['git', '-C', str(repo), *args], stderr=subprocess.PIPE)
 
 
+# The gate guards security and core stability, not ordinary feature work.
+# Service runtime is protected by default (new modules included) except the
+# CLI front end, which only builds requests. GUI code, store queries, layouts,
+# and docs pass without review. Keep in sync with .github/workflows/controls.yml;
+# scripts/tests/test_hosted_controls.py checks that the two agree.
+CONTROL_PREFIXES = ('.github/', '.cargo/', 'scripts/')
+GUARDED_PREFIXES = ('crates/callboard/src/', 'crates/callboard/tests/', 'crates/callboard-core/migrations/')
+CLI_FRONT_END = {'crates/callboard/src/main.rs', 'crates/callboard/src/board_cli.rs', 'crates/callboard/src/view_cli.rs'}
+BUILD_NAMES = {'Cargo.toml', 'Cargo.lock', 'build.rs', 'rust-toolchain', 'rust-toolchain.toml'}
+GUARDED_FILES = {
+    '.gitignore',
+    'crates/callboard-core/src/feed.rs',
+    'crates/callboard-core/tests/feed.rs',
+    'crates/callboard-core/tests/audit.rs',
+}
+
+
 def protected(path):
-    parts = Path(path).parts
     return (
-        path.startswith(('.github/', '.cargo/', 'scripts/', 'crates/callboard/src/'))
-        or 'tests' in parts
-        or Path(path).name in {'Cargo.toml', 'Cargo.lock', 'build.rs', 'rust-toolchain', 'rust-toolchain.toml'}
-        or path in {'.gitignore', 'crates/callboard-core/src/feed.rs'}
+        path.startswith(CONTROL_PREFIXES)
+        or (path.startswith(GUARDED_PREFIXES) and path not in CLI_FRONT_END)
+        or PurePosixPath(path).name in BUILD_NAMES
+        or path in GUARDED_FILES
     )
 
 

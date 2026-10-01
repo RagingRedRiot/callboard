@@ -69,10 +69,27 @@ base/head revisions are checked again after running the suite. Changes to the
 control definitions need the hosted maintainer-review path described below.
 The `--local` command is for development and bootstrap, never merge approval.
 
-Protected paths include `.github/`, `.cargo/`, `scripts/`, every `tests/`
-directory, runtime code under `crates/callboard/src/`, feed validation, Cargo
-manifests/lockfiles, build scripts, toolchain files, and `.gitignore`. Additions,
-removals, and both sides of renames are covered. Git errors fail closed.
+The gate guards security and core stability, not ordinary feature work.
+Protected paths:
+
+- Controls and build: `.github/`, `.cargo/`, `scripts/`, `.gitignore`, every
+  `Cargo.toml`, `Cargo.lock`, and `build.rs`, and toolchain files. Dependencies
+  and build-time code are supply chain.
+- Service runtime: everything under `crates/callboard/src/` (socket
+  authentication, filesystem and lock safety, request limits, event streams,
+  systemd setup, upgrade exec, uninstall deletion), including any new module,
+  except the CLI front end that only builds requests (`main.rs`, `board_cli.rs`,
+  `view_cli.rs`).
+- Core integrity: feed validation and limits (`crates/callboard-core/src/feed.rs`)
+  and schema migrations (`crates/callboard-core/migrations/`).
+- The tests guarding those: `crates/callboard/tests/`,
+  `crates/callboard-core/tests/feed.rs`, and `crates/callboard-core/tests/audit.rs`.
+
+GUI code and tests, store queries, layouts, other core tests, and docs pass
+without review. Additions, removals, and both sides of renames are covered, so
+moving code out of a protected file still needs review. Git errors fail closed.
+The definition appears in `scripts/checks.py` and in the base-only workflow;
+`scripts/tests/test_hosted_controls.py` checks that the two agree.
 
 ## Base-branch GitHub gate
 

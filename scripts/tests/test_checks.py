@@ -50,6 +50,18 @@ class ReviewGate(unittest.TestCase):
         self.commit()
         self.review()
 
+    def test_gui_and_cli_changes_need_no_control_approval(self):
+        self.write('crates/callboard-gui/src/app.rs', 'new gui')
+        self.write('crates/callboard/src/board_cli.rs', 'new cli')
+        self.write('crates/callboard-core/src/store.rs', 'new query')
+        self.commit()
+        self.review()
+
+    def test_new_service_module_is_protected(self):
+        self.write('crates/callboard/src/new_module.rs', 'new runtime code')
+        self.commit()
+        self.assert_blocked()
+
     def test_control_edits_cannot_be_approved_by_a_digest(self):
         self.write('scripts/checks.py', 'changed control')
         self.commit()

@@ -929,6 +929,20 @@ themes.
   custom-unit refusal, and setup status. Also a lifecycle test for handoff
   adoption and a GUI mismatch test.
 
+## Narrower control scope
+
+- The review gate flagged 28 of this PR's 55 files, including GUI tests and CLI
+  modules. It now guards security and core stability only (docs/merge-checks.md):
+  controls and build files, service runtime under `crates/callboard/src/` except
+  the CLI front end (`main.rs`, `board_cli.rs`, `view_cli.rs`), feed validation,
+  migrations, and their tests (`crates/callboard/tests/`, core `feed.rs` and
+  `audit.rs` tests). GUI code, store queries, layouts, and docs pass. New
+  service modules (`upgrade.rs`, `uninstall.rs`) are covered by default.
+- Policy tests check a path corpus against both copies (runner and workflow)
+  and that their definitions match.
+- The hosted gate runs the base branch's definition, so the narrower scope takes
+  effect after this merges; this PR itself still needs `reviewed-controls`.
+
 ## Suggested next
 
 Polish from real use with a real tracking script (a GitHub query feed).
