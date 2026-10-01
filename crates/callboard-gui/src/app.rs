@@ -1232,7 +1232,7 @@ impl App {
             .default_size(240.0)
             .show(ui, |ui| self.sidebar(ui, &entries, &placed, &mut actions));
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(ui.visuals().extreme_bg_color))
+            .frame(egui::Frame::NONE.fill(canvas_fill(ui.visuals())))
             .show(ui, |ui| self.canvas(ui, &mut actions));
         if self.closing {
             self.close_window(ui);
@@ -1409,9 +1409,7 @@ impl App {
                 if let Some(at) = self.cache.refreshed_at {
                     ui.weak(format!(
                         "updated {} ago",
-                        humantime::format_duration(Duration::from_secs(
-                            now.duration_since(at).as_secs()
-                        ))
+                        coarse(Duration::from_secs(now.duration_since(at).as_secs()))
                     ));
                 }
                 let (text, hover) = match self.scheduler.link(now) {
@@ -1614,7 +1612,7 @@ impl App {
                     ui.label(format!("Feed name: {}", feed.name));
                     ui.label(format!(
                         "Last submitted {} ago",
-                        humantime::format_duration(age(feed.last_submitted_at_ms))
+                        coarse(age(feed.last_submitted_at_ms))
                     ));
                     if let Some(limit) = &feed.stale_after {
                         ui.label(format!("Stale after {limit}"));
@@ -2250,6 +2248,16 @@ fn layout_status(ui: &mut egui::Ui, entry: &LayoutEntry, actions: &mut Vec<Actio
     }
 }
 
+/// The canvas behind the cards: darker than the cards in both themes (the
+/// light theme's own background is as pale as a card).
+fn canvas_fill(visuals: &egui::Visuals) -> egui::Color32 {
+    if visuals.dark_mode {
+        visuals.extreme_bg_color
+    } else {
+        egui::Color32::from_gray(214)
+    }
+}
+
 fn placeholder(ui: &mut egui::Ui, target: &Target) {
     ui.heading(match target {
         Target::Feed(name) => format!("Feed “{name}” no longer exists"),
@@ -2295,6 +2303,12 @@ pub(crate) fn link(ui: &mut egui::Ui, url: Option<&str>) {
     }
 }
 
+/// A duration in its two largest units: "3days 4h", not "3days 4h 12m 5s".
+fn coarse(duration: Duration) -> String {
+    let text = humantime::format_duration(duration).to_string();
+    text.split(' ').take(2).collect::<Vec<_>>().join(" ")
+}
+
 /// When a snoozed item wakes (DESIGN.md §4.1: whichever condition comes first).
 fn snooze_text(state: &ItemViewState) -> String {
     let until = state.snoozed_until_ms.map(|at| {
@@ -2302,9 +2316,7 @@ fn snooze_text(state: &ItemViewState) -> String {
         let left_ms = at.saturating_sub(now_ms()).max(0) as u64;
         let left = Duration::from_secs(left_ms.div_ceil(60_000) * 60);
         // The two largest units are precise enough: "3days 4h", not "… 12m".
-        let text = humantime::format_duration(left).to_string();
-        let coarse: Vec<&str> = text.split(' ').take(2).collect();
-        format!("wakes in {}", coarse.join(" "))
+        format!("wakes in {}", coarse(left))
     });
     match (until, state.wake_on_update) {
         (Some(until), true) => format!("Snoozed · {until} or when it changes"),
@@ -2407,7 +2419,7 @@ fn show_feed(
     ui.label(format!(
         "{} items · submitted {} ago{}",
         feed.items.len(),
-        humantime::format_duration(age(feed.info.last_submitted_at_ms)),
+        coarse(age(feed.info.last_submitted_at_ms)),
         if stale(&feed.info) { " · stale" } else { "" }
     ));
     link(ui, feed.info.source_url.as_deref());
@@ -2638,6 +2650,13 @@ mod tests {
         fn request(&self) -> Request {
             self.requests.try_recv().expect("a fetch request")
         }
+    }
+
+    #[test]
+    fn ages_keep_their_two_largest_units() {
+        assert_eq!(coarse(Duration::from_secs(13 * 3600 + 61)), "13h 1m");
+        assert_eq!(coarse(Duration::from_secs(5)), "5s");
+        assert_eq!(coarse(Duration::ZERO), "0s");
     }
 
     #[test]

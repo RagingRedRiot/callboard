@@ -386,11 +386,20 @@ pub fn show(
         .map(|t| t.item.id)
         .collect();
     ui.horizontal(|ui| {
-        ui.label(format!(
-            "{} ({open} open) · {}",
-            count(items.todos.len(), "todo"),
-            count(items.notes.len(), "note")
-        ));
+        // Archived todos are neither open nor done.
+        ui.label(if card.archive() {
+            format!(
+                "{} · {}",
+                count(items.todos.len(), "todo"),
+                count(items.notes.len(), "note")
+            )
+        } else {
+            format!(
+                "{} ({open} open) · {}",
+                count(items.todos.len(), "todo"),
+                count(items.notes.len(), "note")
+            )
+        });
         if card.archive() {
             return;
         }
@@ -546,7 +555,15 @@ fn todo_list(ui: &mut egui::Ui, card: &Card, todos: &[BoardItem<Todo>], actions:
                     ui,
                     |ui, actions| {
                         let mut done = card.done(&todo.item);
-                        if ui.checkbox(&mut done, &todo.item.title).changed() {
+                        // Done todos are struck through and dimmed.
+                        let title = if done {
+                            egui::RichText::new(&todo.item.title)
+                                .strikethrough()
+                                .color(ui.visuals().weak_text_color())
+                        } else {
+                            egui::RichText::new(&todo.item.title)
+                        };
+                        if ui.checkbox(&mut done, title).changed() {
                             actions.push(card.patch(
                                 Kind::Todo,
                                 todo.item.id,
@@ -628,6 +645,8 @@ fn sticky<R>(
         .inner_margin(8.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            // Full-contrast text on the colored note.
+            ui.visuals_mut().override_text_color = Some(ui.visuals().strong_text_color());
             contents(ui)
         })
 }

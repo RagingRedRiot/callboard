@@ -826,7 +826,24 @@ complete, so this is GUI-only (new `board.rs`).
   service after two disagreeing reloads; promoting from a feed covered by a
   board leaves the board in front.
 
+### Visual pass
+
+Rendered every card type, menu, editor, and dialog in dark and light themes
+with egui_kittest's wgpu renderer (in a scratch worktree with the `wgpu` and
+`snapshot` dev features; the repository's dependencies are unchanged), since
+the desktop screenshot portal was unavailable. Fixed what it showed:
+
+- Light theme: the canvas was as pale as the cards; it is now mid-grey.
+- Notes use the strong text color, so text reads on colored notes in dark.
+- Done todos are struck through and dimmed.
+- Ages ("submitted …", "updated …", sidebar hover) keep their two largest
+  units, as snooze wake times already did.
+- The deleted-board archive's header no longer says "(n open)".
+
+Dialogs, menus, quick open, editors, and the error bar looked right in both
+themes.
+
 ## Suggested next
 
-Polish from real use of board editing, drag-to-promote, quick open, and feed
-reordering; click through feed reordering on the desktop.
+Polish from real use. Feed items still show Snooze and Promote on every
+item; a … menu like board items have would quiet long feeds.
