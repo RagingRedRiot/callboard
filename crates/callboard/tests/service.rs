@@ -1059,7 +1059,7 @@ async fn layout_rename_delete_preferences_and_list_counts() {
     let boards = f.api("GET", "/boards", json!(null)).await.1;
     assert_eq!(
         boards,
-        json!([{"id":id,"name":"Work","todo_count":1,"open_todo_count":1,"note_count":1}])
+        json!([{"id":id,"name":"Work","color":null,"todo_count":1,"open_todo_count":1,"note_count":1}])
     );
     f.stop().await;
     assert!(service.wait().await.unwrap().success());
@@ -1536,6 +1536,62 @@ async fn feed_descriptions_windows_colors_and_changes_over_http_and_cli() {
     assert_eq!(list[0]["new_count"], 2);
     // Marks follow time alone: there is nothing to mark seen.
     assert_eq!(f.api("POST", "/feeds/work/seen", json!({})).await.0, 404);
+    f.stop().await;
+    assert!(service.wait().await.unwrap().success());
+}
+
+#[tokio::test]
+async fn todo_and_board_colors_over_http_and_cli() {
+    let f = Fixture::new();
+    let mut service = f.command().arg("serve").spawn().unwrap();
+    f.wait_ready().await;
+    let (_, board) = f.api("POST", "/boards", json!({"name": "Home"})).await;
+    let id = board["id"].as_i64().unwrap();
+    assert_eq!(board["color"], Value::Null);
+
+    let (status, board) = f
+        .api(
+            "PATCH",
+            &format!("/boards/{id}"),
+            json!({"color": "purple"}),
+        )
+        .await;
+    assert_eq!((status, board["name"].clone()), (200, json!("Home")));
+    assert_eq!(board["color"], "purple");
+    let (status, _) = f
+        .api("PATCH", &format!("/boards/{id}"), json!({"color": "teal"}))
+        .await;
+    assert_eq!(status, 400);
+    let (_, boards) = f.api("GET", "/boards", json!(null)).await;
+    assert_eq!(boards[0]["color"], "purple");
+
+    let (status, todo) = f
+        .api(
+            "POST",
+            &format!("/boards/{id}/todos"),
+            json!({"title": "Paint", "color": "red"}),
+        )
+        .await;
+    assert_eq!((status, todo["color"].clone()), (201, json!("red")));
+    let (status, _) = f
+        .api(
+            "POST",
+            &format!("/boards/{id}/todos"),
+            json!({"title": "Bad", "color": "teal"}),
+        )
+        .await;
+    assert_eq!(status, 400);
+
+    let added = f
+        .cli(&["todo", "add", "Home", "Sand", "--color", "yellow"], "")
+        .await;
+    assert!(added.status.success(), "{added:?}");
+    assert_eq!(json_output(&added)["color"], "yellow");
+    let cleared = f.cli(&["board", "color", "Home", "none"], "").await;
+    assert!(cleared.status.success(), "{cleared:?}");
+    assert_eq!(json_output(&cleared)["color"], Value::Null);
+    let green = f.cli(&["board", "color", "Home", "green"], "").await;
+    assert_eq!(json_output(&green)["color"], "green");
     f.stop().await;
     assert!(service.wait().await.unwrap().success());
 }

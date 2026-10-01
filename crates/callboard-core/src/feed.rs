@@ -87,6 +87,17 @@ fn invalid(message: impl Into<String>) -> ValidationError {
 }
 
 /// Feed identity is ASCII and matches `[a-z0-9][a-z0-9._-]{0,63}`.
+/// A color must be one of [`ITEM_COLORS`].
+pub fn validate_color(color: &str) -> Result<(), ValidationError> {
+    if ITEM_COLORS.contains(&color) {
+        Ok(())
+    } else {
+        Err(invalid(
+            "color must be red, orange, yellow, green, blue, purple, pink, or gray",
+        ))
+    }
+}
+
 pub fn validate_feed_name(name: &str) -> Result<(), ValidationError> {
     let is_alphanumeric = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
     if name.is_empty()

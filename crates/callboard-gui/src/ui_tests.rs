@@ -121,7 +121,10 @@ fn board(
         item(n, d)
     };
     serde_json::from_value(json!({
-        "board": name.map(|name| json!({"id": id, "name": name})),
+        // Inbox is blue, as in the board list.
+        "board": name.map(|name| json!({
+            "id": id, "name": name, "color": (id == 2).then_some("blue")
+        })),
         "todos": todos.iter().map(todo).collect::<Vec<_>>(),
         "notes": notes.iter().map(note).collect::<Vec<_>>(),
     }))
@@ -155,6 +158,7 @@ fn answer(request: Request, saved: &Saved) -> Fetched {
                         info: BoardInfo {
                             id: 2,
                             name: "Inbox".into(),
+                            color: Some("blue".into()),
                         },
                         todo_count: 2,
                         open_todo_count: 1,
@@ -164,6 +168,7 @@ fn answer(request: Request, saved: &Saved) -> Fetched {
                         info: BoardInfo {
                             id: 3,
                             name: "Later".into(),
+                            color: None,
                         },
                         todo_count: 0,
                         open_todo_count: 0,
@@ -1574,6 +1579,7 @@ fn new_board_creates_it_and_places_its_card() {
         Ok(Reply::Board(BoardInfo {
             id: 4,
             name: "Ideas".into(),
+            color: None,
         })),
     );
     assert!(ui.harness.query_by_label("New board").is_none());
@@ -2035,4 +2041,56 @@ fn a_mark_ends_when_the_window_does_without_a_refetch() {
     ui.harness.step();
     assert!(ui.harness.query_by_label("new").is_none());
     assert!(ui.ends.requests.try_recv().is_err(), "no refetch needed");
+}
+
+// Colors set in the GUI (DESIGN.md §6.3).
+
+#[test]
+fn the_board_menu_recolors_the_board() {
+    let mut ui = inbox();
+    ui.harness.get_by_label("Board").click();
+    ui.settle();
+    ui.harness.get_by_label_contains("Color").hover();
+    ui.settle();
+    // The current color does nothing; another color or None recolors.
+    ui.harness.get_by_label("Blue").click();
+    ui.settle();
+    assert!(ui.ops().is_empty());
+    for (label, color) in [("Green", Some("green")), ("None", None)] {
+        ui.harness.get_by_label("Board").click();
+        ui.settle();
+        ui.harness.get_by_label_contains("Color").hover();
+        ui.settle();
+        ui.harness.get_by_label(label).click();
+        ui.settle();
+        assert_eq!(
+            ui.ops(),
+            [board_op(BoardOp::Recolor {
+                id: 2,
+                color: color.map(str::to_owned),
+            })]
+        );
+    }
+}
+
+#[test]
+fn todos_and_notes_take_any_of_the_eight_colors() {
+    let mut ui = inbox();
+    ui.item_menu(0);
+    ui.harness.get_by_label("Edit…").click();
+    ui.settle();
+    ui.harness.get_by_label("Red").click();
+    ui.harness.get_by_label("Save").click();
+    ui.settle();
+    assert_eq!(ui.ops(), [patch(Kind::Todo, 10, json!({"color": "red"}))]);
+    ui.item_menu(2);
+    ui.harness.get_by_label("Edit…").click();
+    ui.settle();
+    for label in ["Red", "Orange", "Gray"] {
+        ui.harness.get_by_label(label);
+    }
+    ui.harness.get_by_label("Gray").click();
+    ui.harness.get_by_label("Save").click();
+    ui.settle();
+    assert_eq!(ui.ops(), [patch(Kind::Note, 20, json!({"color": "gray"}))]);
 }

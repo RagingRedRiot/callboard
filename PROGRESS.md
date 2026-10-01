@@ -884,6 +884,22 @@ themes.
   the header, badges, details, and a badge ending on time with no refetch.
   Rendered every color in both themes.
 
+## Colors for todos, notes, and boards
+
+- The user wanted feeds colored only by their scripts and everything else
+  from the GUI. Migration 0009 adds `todos.color` and `boards.color`. Notes,
+  todos, and boards now share the feed item palette, validated in the store
+  (`feed::validate_color`; note colors were free-form before).
+- API: todo creation and PATCH take `color`; `PATCH /boards/{id}` takes
+  `name`, `color`, or both (`BoardPatch`, `Store::patch_board`, returning the
+  board); `BoardInfo` carries `color`. CLI: `todo add --color`, `board color
+  BOARD COLOR|none`.
+- GUI: the item editor offers all eight colors for todos and notes; colored
+  todo rows are tinted; the Board menu's Color submenu recolors the board,
+  which tints its card's title bar and adds a sidebar swatch.
+- Tests: store colors and validation for each kind, HTTP and CLI, and GUI
+  tests for the Color submenu and editor colors.
+
 ## Suggested next
 
 Polish from real use with a real tracking script (a GitHub query feed).

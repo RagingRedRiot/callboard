@@ -44,6 +44,10 @@ pub enum BoardOp {
         id: i64,
         name: String,
     },
+    Recolor {
+        id: i64,
+        color: Option<String>,
+    },
     /// Deletes the board; its items, archived ones included, move to the
     /// deleted-board archive.
     Delete {
@@ -84,6 +88,9 @@ impl BoardOp {
             BoardOp::Rename { id, name } => {
                 vec![("PATCH", format!("/boards/{id}"), json!({ "name": name }))]
             }
+            BoardOp::Recolor { id, color } => {
+                vec![("PATCH", format!("/boards/{id}"), json!({ "color": color }))]
+            }
             BoardOp::Delete { id } => vec![(
                 "DELETE",
                 format!("/boards/{id}"),
@@ -117,7 +124,7 @@ impl BoardOp {
     pub fn boards(&self) -> Vec<i64> {
         match self {
             BoardOp::Create { .. } => vec![],
-            BoardOp::Rename { id, .. } => vec![*id],
+            BoardOp::Rename { id, .. } | BoardOp::Recolor { id, .. } => vec![*id],
             BoardOp::Delete { id } => vec![*id, ARCHIVE_BOARD],
             BoardOp::AddTodo { board, .. }
             | BoardOp::AddNote { board, .. }
@@ -136,6 +143,7 @@ impl BoardOp {
         match self {
             BoardOp::Create { .. } => "Could not create the board".into(),
             BoardOp::Rename { .. } => "Could not rename the board".into(),
+            BoardOp::Recolor { .. } => "Could not change the board's color".into(),
             BoardOp::Delete { .. } => "Could not delete the board".into(),
             BoardOp::AddTodo { .. } => "Could not add the todo".into(),
             BoardOp::AddNote { .. } => "Could not add the note".into(),
@@ -203,19 +211,31 @@ fn write(op: BoardOp) -> Action {
     Action::Write(WriteOp::Board(op))
 }
 
-/// Sticky-note colors: stored value and menu label.
-pub const COLORS: [(&str, &str); 5] = [
+/// Colors for notes, todos, and boards: stored value and menu label. The
+/// same names feed items use (DESIGN.md §3.2).
+pub const COLORS: [(&str, &str); 8] = [
+    ("red", "Red"),
+    ("orange", "Orange"),
     ("yellow", "Yellow"),
     ("green", "Green"),
     ("blue", "Blue"),
-    ("pink", "Pink"),
     ("purple", "Purple"),
+    ("pink", "Pink"),
+    ("gray", "Gray"),
 ];
 
 fn note_fill(color: Option<&str>, visuals: &egui::Visuals) -> egui::Color32 {
     color
         .and_then(|c| color_fill(c, visuals))
         .unwrap_or(visuals.faint_bg_color)
+}
+
+/// A small mark of a named color that stands out against the theme's
+/// background: the other theme's shade.
+pub(crate) fn color_swatch(color: &str, visuals: &egui::Visuals) -> Option<egui::Color32> {
+    let mut other = visuals.clone();
+    other.dark_mode = !visuals.dark_mode;
+    color_fill(color, &other)
 }
 
 /// A named color's fill for notes and feed items (DESIGN.md §3.2): muted in
@@ -259,7 +279,7 @@ impl Draft {
             title: todo.title.clone(),
             body: todo.body.clone().unwrap_or_default(),
             url: todo.url.clone().unwrap_or_default(),
-            color: None,
+            color: todo.color.clone(),
             error: None,
             focus: false,
         }
@@ -420,6 +440,23 @@ pub fn show(
                     actions.push(Action::Prompt(PromptKind::RenameBoard(card.board)));
                     ui.close();
                 }
+                let current = items.board.as_ref().and_then(|b| b.color.clone());
+                ui.menu_button("Color", |ui| {
+                    let choices = std::iter::once((None, "None"))
+                        .chain(COLORS.iter().map(|(value, label)| (Some(*value), *label)));
+                    for (value, label) in choices {
+                        let chosen = current.as_deref() == value;
+                        if ui.add(egui::Button::selectable(chosen, label)).clicked() {
+                            if !chosen {
+                                actions.push(write(BoardOp::Recolor {
+                                    id: card.board,
+                                    color: value.map(str::to_owned),
+                                }));
+                            }
+                            ui.close();
+                        }
+                    }
+                });
                 if ui
                     .add_enabled(!done.is_empty(), egui::Button::new("Archive done"))
                     .clicked()
@@ -560,8 +597,21 @@ fn todo_list(ui: &mut egui::Ui, card: &Card, todos: &[BoardItem<Todo>], actions:
             if let Some(rect) = editor(ui, card, &draft, actions) {
                 return (rect, None);
             }
-            let row = ui.group(|ui| {
+            let fill = todo
+                .item
+                .color
+                .as_deref()
+                .and_then(|c| color_fill(c, ui.visuals()));
+            let mut frame = egui::Frame::group(ui.style());
+            if let Some(fill) = fill {
+                frame = frame.fill(fill);
+            }
+            let row = frame.show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                if fill.is_some() {
+                    // Full-contrast text on the colored row.
+                    ui.visuals_mut().override_text_color = Some(ui.visuals().strong_text_color());
+                }
                 item_row(
                     ui,
                     |ui, actions| {
@@ -943,7 +993,7 @@ fn editor(
         };
         field(ui, body_label, &mut draft.body, true);
         field(ui, "Link", &mut draft.url, false);
-        if draft.kind == Kind::Note {
+        {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Color");
                 ui.selectable_value(&mut draft.color, None, "None");

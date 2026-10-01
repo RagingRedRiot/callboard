@@ -22,6 +22,12 @@ pub enum BoardCommand {
         board: String,
         name: String,
     },
+    /// Set a board's color (red, orange, yellow, green, blue, purple, pink,
+    /// gray), or clear it with `none`.
+    Color {
+        board: String,
+        color: String,
+    },
     /// Delete a board; nonempty boards require --archive-contents.
     Rm {
         board: String,
@@ -43,6 +49,8 @@ pub enum TodoCommand {
         body: Option<String>,
         #[arg(long)]
         url: Option<String>,
+        #[arg(long)]
+        color: Option<String>,
     },
     /// Complete a todo, or undo completion with --undone.
     Done {
@@ -169,6 +177,12 @@ pub async fn board(
             req.resource = format!("/boards/{}", board_id(&board, paths, auto).await?);
             Ok(req)
         }
+        BoardCommand::Color { board, color } => {
+            let color = (color != "none").then_some(color);
+            let mut req = request("PATCH", String::new(), json!({ "color": color }))?;
+            req.resource = format!("/boards/{}", board_id(&board, paths, auto).await?);
+            Ok(req)
+        }
         BoardCommand::Get { board } => request(
             "GET",
             format!("/boards/{}", board_id(&board, paths, auto).await?),
@@ -201,12 +215,13 @@ pub async fn todo(
             title,
             body,
             url,
+            color,
         } => {
             content(Some(&title), body.as_deref())?;
             let mut req = request(
                 "POST",
                 String::new(),
-                json!({"title":title,"body":body,"url":url}),
+                json!({"title":title,"body":body,"url":url,"color":color}),
             )?;
             req.resource = format!("/boards/{}/todos", board_id(&board, paths, auto).await?);
             Ok(req)

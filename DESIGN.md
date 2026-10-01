@@ -198,16 +198,20 @@ updated on each change of that value. Tools should send stable values
 
 ### 5.1 Boards
 
-A board is a named, user-created collection of todos and notes. Boards are
-created, renamed, and deleted from the GUI or CLI. Deleting a board requires it
-to be empty or an explicit confirmation that archives its contents.
+A board is a named, user-created collection of todos and notes, with an
+optional color. Boards are created, renamed, recolored, and deleted from the
+GUI or CLI. Deleting a board requires it to be empty or an explicit
+confirmation that archives its contents.
 
 ### 5.2 Todos and notes
 
-A todo has a title, optional body and URL, a done flag, an optional reference
-(§5.3), and a position in its board. A note has a body, an optional title and
-URL, color, and reference, and a position in its board; the GUI renders notes
-as sticky notes beside the board's todo list.
+A todo has a title, optional body, URL, and color, a done flag, an optional
+reference (§5.3), and a position in its board. A note has a body, an optional
+title, URL, color, and reference, and a position in its board; the GUI renders
+notes as sticky notes beside the board's todo list. Colors on boards, todos,
+and notes are set by the user and come from the feed item palette (§3.2):
+`red`, `orange`, `yellow`, `green`, `blue`, `purple`, `pink`, or `gray`; any
+other value is rejected.
 
 Todos and notes never expire. Marking a todo done keeps it visible until it is
 archived. Archiving hides an item into the board's archive, from which it can be
@@ -332,15 +336,16 @@ to the service at once; the card refetches and shows what was stored.
   state at once and reverting if the service refuses. Done todos stay
   until archived; **Archive done** in the board menu archives them together.
 - **Edit**: an item's **…** menu opens an editor in its place for the title,
-  body, and link, and for notes a color. Save (or Enter in a single-line
+  body, link, and color. A colored todo's row is tinted, like a sticky note. Save (or Enter in a single-line
   field) stores only the fields that changed; Cancel or Escape discards.
 - **Reorder** by dragging the handle at an item's left within its list.
 - **Move to** another board, **Archive**, or **Delete…** (permanent, after
   confirmation) from the same menu.
 - **Show archived (n)** lists the board's archived items with **Restore** and
   **Delete…**.
-- The **Board** menu renames the board, archives done todos, or deletes the
-  board. The confirmation says that its todos and notes, archived ones
+- The **Board** menu renames the board, sets its **Color** (tinting the
+  card's title bar and marking its sidebar entry with a swatch), archives
+  done todos, or deletes the board. The confirmation says that its todos and notes, archived ones
   included, move to the deleted-board archive. Deleting a board from the GUI
   closes its card in the active layout.
 - **New board…** in the sidebar creates a board and places its card;
@@ -505,7 +510,7 @@ directories are private to the user.
 | `DELETE /feeds/{name}` | Delete a feed (§3.6) |
 | `PATCH /feeds/{name}/items/{key}` | Set snooze or position |
 | `GET /boards`, `POST /boards` | List or create boards |
-| `PATCH /boards/{id}`, `DELETE /boards/{id}` | Rename or delete a board |
+| `PATCH /boards/{id}`, `DELETE /boards/{id}` | Rename or recolor (`{"name"}`, `{"color"}`, or both), or delete a board |
 | `POST /boards/{id}/todos`, `POST /boards/{id}/notes` | Create a todo or note |
 | `PATCH /todos/{id}`, `PATCH /notes/{id}` | Edit, move, complete, archive, restore |
 | `DELETE /todos/{id}`, `DELETE /notes/{id}` | Delete permanently |

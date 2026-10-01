@@ -64,7 +64,7 @@ async fn migrations_wal_and_data_survive_reopening() {
             .fetch_one(&mut conn)
             .await
             .unwrap(),
-        8
+        9
     );
     conn.close().await.unwrap();
     reopened.close().await;

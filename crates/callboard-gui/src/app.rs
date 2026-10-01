@@ -91,6 +91,14 @@ impl Cache {
         self.boards.iter().find(|b| b.info.id == id)
     }
 
+    /// A board target's color, from the board list.
+    pub fn board_color(&self, target: &Target) -> Option<&str> {
+        match target {
+            Target::Board(id) => self.board(*id)?.info.color.as_deref(),
+            _ => None,
+        }
+    }
+
     /// Whether the lists show the target as deleted (not merely unloaded).
     pub fn gone(&self, target: &Target) -> bool {
         matches!(
@@ -1668,6 +1676,17 @@ impl App {
         details: impl FnOnce(&mut egui::Ui),
     ) {
         ui.horizontal(|ui| {
+            // A board's color as a small swatch before its name.
+            if let Some(fill) = self
+                .cache
+                .board_color(target)
+                .and_then(|c| board::color_swatch(c, ui.visuals()))
+            {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                // Round, so it does not read as a checkbox.
+                ui.painter().circle_filled(rect.center(), 5.0, fill);
+            }
             let title = self.cache.title(target);
             let text = if placed.contains(target) {
                 egui::RichText::new(&title).strong()
@@ -1934,6 +1953,11 @@ impl App {
         );
         let title_rect =
             egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), TITLE_HEIGHT));
+        // A board's color tints its title bar (DESIGN.md §6.3).
+        let title_fill = self
+            .cache
+            .board_color(target)
+            .and_then(|c| board::color_fill(c, &visuals));
         child.painter().rect_filled(
             title_rect.shrink(1.0),
             egui::CornerRadius {
@@ -1942,7 +1966,7 @@ impl App {
                 sw: if card.collapsed { 5 } else { 0 },
                 se: if card.collapsed { 5 } else { 0 },
             },
-            visuals.faint_bg_color,
+            title_fill.unwrap_or(visuals.faint_bg_color),
         );
         let title = child.interact(
             title_rect,
@@ -1961,6 +1985,10 @@ impl App {
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
         bar.set_clip_rect(title_rect.intersect(area));
+        if title_fill.is_some() {
+            // Full-contrast title on the board's color.
+            bar.visuals_mut().override_text_color = Some(visuals.strong_text_color());
+        }
         if bar
             .small_button("×")
             .on_hover_text("Remove this card from the layout")
@@ -2708,6 +2736,7 @@ mod tests {
                     boards: vec![BoardInfo {
                         id: 2,
                         name: "Inbox".into(),
+                        color: None,
                     }],
                     layouts: vec![],
                 }),

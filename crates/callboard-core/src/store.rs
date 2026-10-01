@@ -12,7 +12,7 @@ use sqlx::{FromRow, SqlitePool};
 
 use crate::feed::{
     ChangeSummary, Item, MAX_BODY_BYTES, MAX_SNAPSHOT_BYTES, MAX_TITLE_CHARS, Snapshot,
-    ValidationError, validate_feed_name,
+    ValidationError, validate_color, validate_feed_name,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -278,6 +278,18 @@ pub struct SourceReference {
 pub struct BoardInfo {
     pub id: i64,
     pub name: String,
+    /// Tints the board's card and sidebar entry (§6.3).
+    pub color: Option<String>,
+}
+
+/// `PATCH /boards/{id}`: rename, recolor, or both.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoardPatch {
+    #[serde(default, deserialize_with = "present")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub color: PatchValue<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,6 +300,7 @@ pub struct Todo {
     pub body: Option<String>,
     pub url: Option<String>,
     pub done: bool,
+    pub color: Option<String>,
     pub reference: Option<SourceReference>,
     pub position: i64,
     pub created_at_ms: i64,
@@ -328,6 +341,8 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for PatchValue<T> {
 pub struct TodoPatch {
     #[serde(default, deserialize_with = "present")]
     pub title: Option<String>,
+    #[serde(default)]
+    pub color: PatchValue<Option<String>>,
     #[serde(default)]
     pub body: PatchValue<Option<String>>,
     #[serde(default)]
@@ -375,6 +390,7 @@ struct TodoRow {
     body: Option<String>,
     url: Option<String>,
     done: i64,
+    color: Option<String>,
     reference_feed: Option<String>,
     reference_key: Option<String>,
     position: i64,
@@ -393,6 +409,7 @@ impl From<TodoRow> for Todo {
             body: r.body,
             url: r.url,
             done: r.done != 0,
+            color: r.color,
             reference: r
                 .reference_feed
                 .zip(r.reference_key)
@@ -445,7 +462,7 @@ impl From<NoteRow> for Note {
     }
 }
 
-const TODO_COLUMNS: &str = "id, board_id, title, body, url, done, reference_feed, reference_key, position, created_at_ms, updated_at_ms, archived_at_ms, archived_from_board";
+const TODO_COLUMNS: &str = "id, board_id, title, body, url, done, color, reference_feed, reference_key, position, created_at_ms, updated_at_ms, archived_at_ms, archived_from_board";
 const NOTE_COLUMNS: &str = "id, board_id, title, body, color, reference_feed, reference_key, position, created_at_ms, updated_at_ms, archived_at_ms, archived_from_board, url";
 
 #[derive(FromRow)]
@@ -1204,8 +1221,8 @@ impl Store {
 
     /// User boards with active todo, open todo, and note counts.
     pub async fn board_summaries(&self) -> Result<Vec<BoardSummary>, StoreError> {
-        let rows = sqlx::query_as::<_, (i64, String, i64, i64, i64)>(
-            "SELECT b.id, b.name,
+        let rows = sqlx::query_as::<_, (i64, String, Option<String>, i64, i64, i64)>(
+            "SELECT b.id, b.name, b.color,
                 (SELECT count(*) FROM todos t WHERE t.board_id = b.id AND t.archived_at_ms IS NULL),
                 (SELECT count(*) FROM todos t WHERE t.board_id = b.id AND t.archived_at_ms IS NULL AND t.done = 0),
                 (SELECT count(*) FROM notes n WHERE n.board_id = b.id AND n.archived_at_ms IS NULL)
@@ -1215,8 +1232,8 @@ impl Store {
         .await?;
         Ok(rows
             .into_iter()
-            .map(|(id, name, todos, open, notes)| BoardSummary {
-                info: BoardInfo { id, name },
+            .map(|(id, name, color, todos, open, notes)| BoardSummary {
+                info: BoardInfo { id, name, color },
                 todo_count: todos as usize,
                 open_todo_count: open as usize,
                 note_count: notes as usize,
@@ -1279,33 +1296,63 @@ impl Store {
         Ok(BoardInfo {
             id: result.last_insert_rowid(),
             name: name.to_owned(),
+            color: None,
         })
     }
 
     pub async fn list_boards(&self) -> Result<Vec<BoardInfo>, StoreError> {
         Ok(sqlx::query_as::<_, BoardInfo>(
-            "SELECT id, name FROM boards WHERE is_archive = 0 ORDER BY name, id",
+            "SELECT id, name, color FROM boards WHERE is_archive = 0 ORDER BY name, id",
         )
         .fetch_all(&self.pool)
         .await?)
     }
 
     pub async fn rename_board(&self, id: i64, name: &str) -> Result<(), StoreError> {
-        let name = name.trim();
-        if name.is_empty() {
+        self.patch_board(
+            id,
+            BoardPatch {
+                name: Some(name.to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Rename or recolor a board; omitted fields are unchanged.
+    pub async fn patch_board(&self, id: i64, patch: BoardPatch) -> Result<BoardInfo, StoreError> {
+        let name = patch.name.as_deref().map(str::trim);
+        if name.is_some_and(str::is_empty) {
             return Err(StoreError::EmptyBoardName);
         }
-        let result = sqlx::query("UPDATE boards SET name = ? WHERE id = ? AND is_archive = 0")
-            .bind(name)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(board_name_error)?;
+        if let Some(Some(color)) = &patch.color.0 {
+            validate_color(color)?;
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let result = sqlx::query(
+            "UPDATE boards SET name = coalesce(?, name),
+               color = CASE WHEN ? THEN ? ELSE color END
+             WHERE id = ? AND is_archive = 0",
+        )
+        .bind(name)
+        .bind(patch.color.0.is_some())
+        .bind(patch.color.0.as_ref().and_then(Option::as_deref))
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(board_name_error)?;
         if result.rows_affected() == 0 {
             return Err(StoreError::BoardNotFound(id));
         }
+        let board =
+            sqlx::query_as::<_, BoardInfo>("SELECT id, name, color FROM boards WHERE id = ?")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+        tx.commit().await?;
         self.notify(Change::Board { id });
-        Ok(())
+        Ok(board)
     }
 
     /// Delete an empty board, or move all its items to the private archive when
@@ -1357,13 +1404,29 @@ impl Store {
         url: Option<&str>,
         reference: Option<&SourceReference>,
     ) -> Result<Todo, StoreError> {
+        self.add_todo_with(board_id, title, body, url, None, reference)
+            .await
+    }
+
+    pub async fn add_todo_with(
+        &self,
+        board_id: i64,
+        title: &str,
+        body: Option<&str>,
+        url: Option<&str>,
+        color: Option<&str>,
+        reference: Option<&SourceReference>,
+    ) -> Result<Todo, StoreError> {
         validate_board_content(Some(title), body)?;
+        if let Some(color) = color {
+            validate_color(color)?;
+        }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         ensure_user_board(&mut tx, board_id).await?;
         let position = next_position(&mut tx, "todos", board_id, false).await?;
         let at = now_ms()?;
-        sqlx::query("INSERT INTO todos (board_id, title, body, url, reference_feed, reference_key, position, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-            .bind(board_id).bind(title).bind(body).bind(url)
+        sqlx::query("INSERT INTO todos (board_id, title, body, url, color, reference_feed, reference_key, position, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(board_id).bind(title).bind(body).bind(url).bind(color)
             .bind(reference.map(|r| r.feed.as_str())).bind(reference.map(|r| r.key.as_str()))
             .bind(position).bind(at).bind(at).execute(&mut *tx).await?;
         let id = sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
@@ -1401,6 +1464,9 @@ impl Store {
         reference: Option<&SourceReference>,
     ) -> Result<Note, StoreError> {
         validate_board_content(title, Some(body))?;
+        if let Some(color) = color {
+            validate_color(color)?;
+        }
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         ensure_user_board(&mut tx, board_id).await?;
         let position = next_position(&mut tx, "notes", board_id, false).await?;
@@ -1513,7 +1579,7 @@ impl Store {
         let board = if let Some(id) = id {
             Some(
                 sqlx::query_as::<_, BoardInfo>(
-                    "SELECT id, name FROM boards WHERE id = ? AND is_archive = 0",
+                    "SELECT id, name, color FROM boards WHERE id = ? AND is_archive = 0",
                 )
                 .bind(id)
                 .fetch_optional(&mut *tx)
@@ -1718,6 +1784,9 @@ impl Store {
     }
 
     pub async fn patch_todo(&self, id: i64, patch: TodoPatch) -> Result<Todo, StoreError> {
+        if let Some(Some(color)) = &patch.color.0 {
+            validate_color(color)?;
+        }
         validate_board_content(
             patch.title.as_deref(),
             patch.body.0.as_ref().and_then(Option::as_deref),
@@ -1747,11 +1816,12 @@ impl Store {
             old_position
         };
         let reference = patch.reference.0.as_ref().and_then(Option::as_ref);
-        sqlx::query("UPDATE todos SET title = coalesce(?, title), body = CASE WHEN ? THEN ? ELSE body END, url = CASE WHEN ? THEN ? ELSE url END, done = coalesce(?, done), reference_feed = CASE WHEN ? THEN ? ELSE reference_feed END, reference_key = CASE WHEN ? THEN ? ELSE reference_key END, board_id = ?, position = ?, archived_at_ms = ?, archived_from_board = CASE WHEN ? THEN NULL ELSE archived_from_board END, updated_at_ms = ? WHERE id = ?")
+        sqlx::query("UPDATE todos SET title = coalesce(?, title), body = CASE WHEN ? THEN ? ELSE body END, url = CASE WHEN ? THEN ? ELSE url END, done = coalesce(?, done), color = CASE WHEN ? THEN ? ELSE color END, reference_feed = CASE WHEN ? THEN ? ELSE reference_feed END, reference_key = CASE WHEN ? THEN ? ELSE reference_key END, board_id = ?, position = ?, archived_at_ms = ?, archived_from_board = CASE WHEN ? THEN NULL ELSE archived_from_board END, updated_at_ms = ? WHERE id = ?")
             .bind(patch.title.as_deref())
             .bind(patch.body.0.is_some()).bind(patch.body.0.as_ref().and_then(Option::as_deref))
             .bind(patch.url.0.is_some()).bind(patch.url.0.as_ref().and_then(Option::as_deref))
             .bind(patch.done)
+            .bind(patch.color.0.is_some()).bind(patch.color.0.as_ref().and_then(Option::as_deref))
             .bind(patch.reference.0.is_some()).bind(reference.map(|r| r.feed.as_str()))
             .bind(patch.reference.0.is_some()).bind(reference.map(|r| r.key.as_str()))
             .bind(board_id).bind(position).bind(archived_at).bind(moved_or_restored)
@@ -1775,6 +1845,9 @@ impl Store {
     }
 
     pub async fn patch_note(&self, id: i64, patch: NotePatch) -> Result<Note, StoreError> {
+        if let Some(Some(color)) = &patch.color.0 {
+            validate_color(color)?;
+        }
         validate_board_content(
             patch.title.0.as_ref().and_then(Option::as_deref),
             patch.body.as_deref(),

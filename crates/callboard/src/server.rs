@@ -6,7 +6,8 @@ use crate::{
 use callboard_core::{
     feed::{MAX_SNAPSHOT_BYTES, Snapshot, validate_feed_name},
     store::{
-        FeedItemPatch, NotePatch, PreferencesPatch, SourceReference, Store, StoreError, TodoPatch,
+        BoardPatch, FeedItemPatch, NotePatch, PreferencesPatch, SourceReference, Store, StoreError,
+        TodoPatch,
     },
 };
 use http_body_util::{BodyExt, Full, Limited, combinators::UnsyncBoxBody};
@@ -502,17 +503,13 @@ async fn handle_board_api(request: Request<Incoming>, store: &Store, parts: &[&s
             }
         }
         ["", "boards", id] if id.parse::<i64>().is_ok() && method == Method::PATCH => {
-            #[derive(Deserialize)]
-            struct Rename {
-                name: String,
-            }
             let id = id.parse().unwrap();
-            let body = match request_json::<Rename>(request).await {
+            let patch = match request_json::<BoardPatch>(request).await {
                 Ok(v) => v,
                 Err(e) => return e.reply(),
             };
-            match store.rename_board(id, &body.name).await {
-                Ok(()) => reply(StatusCode::OK, json!({"id":id,"name":body.name.trim()})),
+            match store.patch_board(id, patch).await {
+                Ok(board) => reply(StatusCode::OK, board),
                 Err(e) => storage_error(e),
             }
         }
@@ -545,6 +542,7 @@ async fn handle_board_api(request: Request<Incoming>, store: &Store, parts: &[&s
                 title: String,
                 body: Option<String>,
                 url: Option<String>,
+                color: Option<String>,
                 reference: Option<SourceReference>,
             }
             let id = id.parse().unwrap();
@@ -553,11 +551,12 @@ async fn handle_board_api(request: Request<Incoming>, store: &Store, parts: &[&s
                 Err(e) => return e.reply(),
             };
             match store
-                .add_todo(
+                .add_todo_with(
                     id,
                     &body.title,
                     body.body.as_deref(),
                     body.url.as_deref(),
+                    body.color.as_deref(),
                     body.reference.as_ref(),
                 )
                 .await

@@ -234,10 +234,10 @@ dismissible message under the layout bar.
 
 Board cards are editable (DESIGN.md §6.3). Type into **Add a todo** or **Add a
 note** and press Enter; tick a todo's checkbox to mark it done. Each item's
-**…** menu edits it in place (title, details, link, and a color for notes),
+**…** menu edits it in place (title, details, link, and color),
 moves it to another board, archives it, or deletes it after confirmation. Drag
 the dotted handle at an item's left to reorder it. **Show archived** lists
-archived items with **Restore**. The **Board** menu renames the board,
+archived items with **Restore**. The **Board** menu renames the board, sets its color (tinting its title bar),
 archives its done todos, or deletes it (its items move to the deleted-board
 archive, whose card restores them to a chosen board). **New board…** in the
 sidebar creates a board and places its card. Drag a feed item by its dotted
