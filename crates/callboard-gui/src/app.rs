@@ -49,6 +49,8 @@ pub struct Entry {
 pub struct Counts {
     pub shown: usize,
     pub snoozed: usize,
+    /// New or updated since last seen (DESIGN.md §4.3).
+    pub unseen: usize,
 }
 
 impl Cache {
@@ -120,10 +122,12 @@ impl Cache {
                 Target::Feed(name) => self.feed_summary(name).map(|f| Counts {
                     shown: f.item_count.saturating_sub(f.snoozed_count),
                     snoozed: f.snoozed_count,
+                    unseen: f.unseen_count,
                 }),
                 Target::Board(id) => self.board(*id).map(|b| Counts {
                     shown: b.todo_count + b.note_count,
                     snoozed: 0,
+                    unseen: 0,
                 }),
                 Target::Archive => None,
             };
@@ -138,11 +142,13 @@ impl Cache {
                 Some(Counts {
                     shown: feed.items.len() - snoozed,
                     snoozed,
+                    unseen: feed.changes.values().filter(|c| c.status.is_some()).count(),
                 })
             }
             Contents::Board { items: board, .. } => Some(Counts {
                 shown: board.todos.len() + board.notes.len(),
                 snoozed: 0,
+                unseen: 0,
             }),
             Contents::Missing => None,
         }
@@ -280,6 +286,11 @@ pub enum WriteOp {
     ResetOrder {
         feed: String,
         key: String,
+    },
+    /// Mark one item, or every item, seen (§4.3).
+    MarkSeen {
+        feed: String,
+        key: Option<String>,
     },
     Board(BoardOp),
 }
@@ -513,6 +524,15 @@ impl App {
                                     .await
                                     .map(|_| Reply::Done)
                             }
+                            WriteOp::MarkSeen { feed, key } => backend::send(
+                                paths,
+                                auto,
+                                "POST",
+                                &format!("/feeds/{feed}/seen"),
+                                &serde_json::json!({ "key": key }),
+                            )
+                            .await
+                            .map(|_| Reply::Done),
                             WriteOp::Board(op) => {
                                 let mut reply = Reply::Done;
                                 for (method, resource, body) in op.requests() {
@@ -757,6 +777,10 @@ impl App {
                 | WriteOp::ResetOrder { feed, .. },
                 Ok(_),
             ) => self.scheduler.want(Target::Feed(feed)),
+            (WriteOp::MarkSeen { feed, .. }, Ok(_)) => self.scheduler.feed_changed(&feed),
+            (WriteOp::MarkSeen { .. }, Err(error)) => {
+                self.write_error = Some(format!("Could not mark items seen: {error}"));
+            }
             (WriteOp::Reorder { .. } | WriteOp::ResetOrder { .. }, Err(error)) => {
                 self.write_error = Some(format!("Could not reorder the feed: {error}"));
             }
@@ -1725,6 +1749,13 @@ impl App {
             });
             if let Some(counts) = self.cache.counts(target) {
                 ui.weak(counts.shown.to_string());
+                if counts.unseen > 0 {
+                    ui.colored_label(
+                        ui.visuals().selection.stroke.color,
+                        format!("{} new", counts.unseen),
+                    )
+                    .on_hover_text("New or updated since you last looked");
+                }
                 if counts.snoozed > 0 {
                     ui.weak(format!("+{} snoozed", counts.snoozed));
                 }
@@ -2349,6 +2380,7 @@ mod tests {
             info,
             item_count: 0,
             snoozed_count: 0,
+            unseen_count: 0,
             next_wake_at_ms: None,
         }
     }
@@ -2589,10 +2621,12 @@ mod tests {
         FeedInfo {
             name: name.into(),
             title: format!("{name} title"),
+            description: None,
             source_url: None,
             stale_after: None,
             last_submitted_at_ms: now_ms(),
             error: None,
+            last_change: None,
         }
     }
 
@@ -2605,6 +2639,7 @@ mod tests {
                 .collect(),
             manual_order: false,
             view_state: Default::default(),
+            changes: Default::default(),
         })
     }
 
@@ -2660,7 +2695,8 @@ mod tests {
             cache.counts(&Target::Feed("reviews".into())),
             Some(Counts {
                 shown: 2,
-                snoozed: 0
+                snoozed: 0,
+                unseen: 0,
             })
         );
         assert_eq!(cache.marker(&Target::Board(4)), Some("deleted"));

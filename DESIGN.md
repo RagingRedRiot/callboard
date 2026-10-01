@@ -59,6 +59,8 @@ feed name; callboard does not track which tool owns a feed.
 Feed metadata travels with each submission and replaces the stored values:
 
 - `title` — display name; defaults to the feed name.
+- `description` — optional plain text, at most 1000 characters, saying what
+  the feed tracks ("Open PRs in org/repo awaiting my review").
 - `source_url` — optional link to the queue the feed mirrors.
 - `stale_after` — optional duration after which the feed is marked stale (§3.5).
 
@@ -163,6 +165,23 @@ The service stores an optional snooze-until instant as UTC Unix milliseconds and
 a `wake_on_update` flag. Either condition can end a snooze, and both may be set.
 Manual positions are zero-based. Newly submitted items are inserted before the
 existing manual order; reset removes manual order and returns to submitted order.
+
+### 4.3 Changes and seen
+
+The service records, per item, when it was added and when its content last
+changed (an **updated** submission, §3.3), and per feed the last submission
+that added, updated, or removed anything: its time, counts, and the keys and
+titles of up to 20 removed items.
+
+An item is **new** until it is seen, and **updated** when its content changed
+after it was last seen. Marking an item seen records the current time; the GUI
+does so when its details are shown (§6.2), and **Mark all seen** marks the
+whole feed. A feed's first submission is its baseline: those items start out
+seen. Items that existed before change tracking count as seen.
+
+Content includes every item field, so a tool that puts a volatile value (an
+age, a relative time) in `meta` or the body marks the item updated on each
+change of that value. Tools should send stable values (timestamps, not ages).
 
 ## 5. Boards, todos, and notes
 
@@ -269,12 +288,17 @@ error or stale marker, then its visible items in display order (§4.2). Each
 item is a compact row: its title, its link (without the scheme, clicked to
 open), and its snooze state if snoozed. The row's **…** menu snoozes,
 unsnoozes, or promotes it to a board as a todo or note. **Show snoozed**
-reveals snoozed items.
+reveals snoozed items. New and updated items carry a **new** or **updated**
+badge (§4.3). Under the feed's counts the card shows its description and its
+last change ("Changed 10m ago: 2 new · 1 updated · 1 gone", the gone titles on
+hover), and **Mark all seen** while any item is new or updated. The sidebar
+shows each feed's count of new and updated items.
 
 **Details**: resting the pointer on a row highlights it, a line fills along its
 foot, and after one second a card beside the pointer shows everything about
-the item: title, full link, snooze state, body, tags, every `meta` key and
-value, and its key. Passing over rows, dragging, or an open menu shows no card;
+the item: title, full link, new/updated status with when it was added and last
+changed, snooze state, body, tags, every `meta` key and value, and its key.
+Showing the details marks a new or updated item seen. Passing over rows, dragging, or an open menu shows no card;
 moving off the row hides it.
 
 Each item has a drag handle. Released within its own feed's list, the item
@@ -469,6 +493,7 @@ directories are private to the user.
 | `GET /feeds`, `GET /feeds/{name}` | List feeds; read one with items and view state |
 | `DELETE /feeds/{name}` | Delete a feed (§3.6) |
 | `PATCH /feeds/{name}/items/{key}` | Set snooze or position |
+| `POST /feeds/{name}/seen` | Mark one item (`{"key": ...}`) or all items seen (§4.3) |
 | `GET /boards`, `POST /boards` | List or create boards |
 | `PATCH /boards/{id}`, `DELETE /boards/{id}` | Rename or delete a board |
 | `POST /boards/{id}/todos`, `POST /boards/{id}/notes` | Create a todo or note |
@@ -499,7 +524,15 @@ combined with `position`. Item keys in request paths must be percent-encoded
 as a single URI segment (including slashes in URL-shaped keys); the service
 decodes that segment exactly once.
 
-`GET /feeds` entries add `item_count`, `snoozed_count`, and `next_wake_at_ms`
+Feed metadata includes `description` and `last_change` (null, or
+`{"at_ms", "added", "updated", "removed", "removed_items": [{"key", "title"}]}`).
+`GET /feeds/{name}` adds `changes`, mapping each key to `{"added_at_ms",
+"changed_at_ms", "status"}`, where `status` is `"new"`, `"updated"`, or null.
+`POST /feeds/{name}/seen` takes `{}` (every item) or `{"key": ...}`, returns
+`{"seen": n}` (items marked), and emits a feed notice.
+
+`GET /feeds` entries add `item_count`, `snoozed_count`, `unseen_count` (items
+new or updated), and `next_wake_at_ms`
 (the earliest future time-snooze deadline, or null) to the feed metadata; counts
 are evaluated at read time, so clients refetch the list at that deadline.
 `GET /boards` entries add `todo_count`, `open_todo_count`, and `note_count`,

@@ -9,7 +9,10 @@ use crate::{
 use callboard_core::{
     feed::Item,
     layout::{NamedLayout, Preferences},
-    store::{BoardContents, BoardInfo, BoardSummary, Feed, FeedInfo, FeedSummary, ItemViewState},
+    store::{
+        BoardContents, BoardInfo, BoardSummary, ChangeStatus, Feed, FeedInfo, FeedSummary,
+        ItemChange, ItemViewState, LastChange, RemovedItem,
+    },
 };
 use eframe::egui::{self, Pos2, Rect, Vec2};
 use egui_kittest::{
@@ -19,14 +22,33 @@ use egui_kittest::{
 use serde_json::json;
 use std::time::Duration;
 
+/// Ten minutes ago, in Unix milliseconds.
+fn minutes_ago(minutes: i64) -> i64 {
+    crate::app::now_ms() - minutes * 60 * 1000
+}
+
+/// Feed "a" has a description and a last change: item 1 added (still new)
+/// and "Gone item" removed, ten minutes ago.
 fn feed_info(name: &str) -> FeedInfo {
+    let a = name == "a";
     FeedInfo {
         name: name.into(),
         title: format!("{name} title"),
+        description: a.then(|| "Open reviews waiting on me".into()),
         source_url: None,
         stale_after: None,
         last_submitted_at_ms: 0,
         error: None,
+        last_change: a.then(|| LastChange {
+            at_ms: minutes_ago(10),
+            added: 1,
+            updated: 0,
+            removed: 1,
+            removed_items: vec![RemovedItem {
+                key: "9".into(),
+                title: "Gone item".into(),
+            }],
+        }),
     }
 }
 
@@ -122,6 +144,7 @@ fn answer(request: Request, saved: &Saved) -> Fetched {
                             info: feed_info(name),
                             item_count: items,
                             snoozed_count: snoozed,
+                            unseen_count: usize::from(name == "a"),
                             next_wake_at_ms: None,
                         })
                         .into(),
@@ -170,6 +193,7 @@ fn answer(request: Request, saved: &Saved) -> Fetched {
                         .collect(),
                     manual_order: false,
                     view_state: Default::default(),
+                    changes: Default::default(),
                 }),
                 Target::Feed(name) => Contents::Feed(Feed {
                     info: feed_info(name),
@@ -192,6 +216,26 @@ fn answer(request: Request, saved: &Saved) -> Fetched {
                             snoozed: true,
                         },
                     )]
+                    .into(),
+                    // Item 1 is new in feed "a"; item 2 predates tracking.
+                    changes: [
+                        (
+                            "1".to_owned(),
+                            ItemChange {
+                                added_at_ms: minutes_ago(10),
+                                changed_at_ms: minutes_ago(10),
+                                status: (name == "a").then_some(ChangeStatus::New),
+                            },
+                        ),
+                        (
+                            "2".to_owned(),
+                            ItemChange {
+                                added_at_ms: 0,
+                                changed_at_ms: 0,
+                                status: None,
+                            },
+                        ),
+                    ]
                     .into(),
                 }),
                 Target::Board(2) => Contents::Board {
@@ -1915,4 +1959,65 @@ fn passing_over_items_or_using_their_menu_shows_no_details() {
     ui.feed_menu(0);
     ui.rest(first, 2.0);
     assert!(!ui.details_shown());
+}
+
+// Feed descriptions and change tracking (DESIGN.md §4.3, §6.2).
+
+#[test]
+fn a_feed_card_shows_its_description_last_change_and_new_items() {
+    let mut ui = side_by_side();
+    ui.harness.get_by_label("Open reviews waiting on me");
+    ui.harness.get_by_label("Changed 10m ago: 1 new · 1 gone");
+    ui.harness.get_by_label("new");
+    // The sidebar counts it too.
+    ui.harness.get_by_label("1 new");
+    ui.harness
+        .get_by_label("Changed 10m ago: 1 new · 1 gone")
+        .hover();
+    for _ in 0..4 {
+        ui.harness.step();
+    }
+    ui.harness.get_by_label("Gone item");
+    ui.harness.get_by_label("Mark all seen").click();
+    ui.settle();
+    assert_eq!(
+        ui.ops(),
+        [WriteOp::MarkSeen {
+            feed: "a".into(),
+            key: None,
+        }]
+    );
+}
+
+#[test]
+fn opening_a_new_items_details_marks_it_seen_once() {
+    let mut ui = side_by_side();
+    let row = ui.harness.get_by_label("Item").rect().center();
+    ui.rest(row, 1.25);
+    assert!(ui.details_shown());
+    ui.harness.get_by_label("Added 10m ago");
+    let seen = WriteOp::MarkSeen {
+        feed: "a".into(),
+        key: Some("1".into()),
+    };
+    assert_eq!(ui.ops(), std::slice::from_ref(&seen));
+    // Resting longer, or coming back before the refetch, sends nothing more.
+    ui.rest(row, 1.0);
+    ui.rest(ui.empty_canvas(), 0.25);
+    ui.rest(row, 1.25);
+    assert!(ui.ops().is_empty());
+    // Items from before change tracking show no times.
+    ui.harness.get_by_label("Show snoozed (1)").click();
+    ui.settle();
+    let card = ui.card(&feed("a"));
+    let later = ui
+        .harness
+        .query_all_by_label("Later")
+        .map(|n| n.rect().center())
+        .find(|p| card.contains(*p))
+        .unwrap();
+    ui.rest(later, 1.25);
+    ui.harness.get_by_label("Key: 2");
+    assert!(ui.harness.query_by_label_contains("Added").is_none());
+    assert!(ui.ops().is_empty());
 }

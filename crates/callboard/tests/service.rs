@@ -1470,3 +1470,67 @@ async fn invalid_view_cli_input_never_starts_service() {
         assert!(!f.paths.socket().exists());
     }
 }
+
+#[tokio::test]
+async fn feed_descriptions_changes_and_seen_over_http_and_cli() {
+    let f = Fixture::new();
+    let mut service = f.command().arg("serve").spawn().unwrap();
+    f.wait_ready().await;
+    let put = f
+        .cli(
+            &["put", "work", "--description", "Open PRs awaiting me"],
+            r#"[{"key":"a","title":"A"},{"key":"b","title":"B"}]"#,
+        )
+        .await;
+    assert!(put.status.success(), "{put:?}");
+    let (_, feed) = f.api("GET", "/feeds/work", json!(null)).await;
+    assert_eq!(feed["info"]["description"], "Open PRs awaiting me");
+    assert_eq!(feed["info"]["last_change"], Value::Null);
+    assert_eq!(feed["changes"]["a"]["status"], Value::Null);
+
+    f.api(
+        "PUT",
+        "/feeds/work",
+        json!({"items": [{"key":"a","title":"A2"}, {"key":"c","title":"C"}]}),
+    )
+    .await;
+    let (_, feed) = f.api("GET", "/feeds/work", json!(null)).await;
+    assert_eq!(feed["changes"]["a"]["status"], "updated");
+    assert_eq!(feed["changes"]["c"]["status"], "new");
+    let change = &feed["info"]["last_change"];
+    assert_eq!(
+        (change["added"].clone(), change["removed"].clone()),
+        (json!(1), json!(1))
+    );
+    assert_eq!(
+        change["removed_items"][0],
+        json!({"key": "b", "title": "B"})
+    );
+    let (_, list) = f.api("GET", "/feeds", json!(null)).await;
+    assert_eq!(list[0]["unseen_count"], 2);
+
+    // One item over HTTP, unknown keys and fields refused, then all by CLI.
+    let (status, seen) = f.api("POST", "/feeds/work/seen", json!({"key": "c"})).await;
+    assert_eq!((status, seen), (200, json!({"seen": 1})));
+    assert_eq!(
+        f.api("POST", "/feeds/work/seen", json!({"key": "zz"}))
+            .await
+            .0,
+        404
+    );
+    assert_eq!(
+        f.api("POST", "/feeds/work/seen", json!({"keys": []}))
+            .await
+            .0,
+        400
+    );
+    assert_eq!(f.api("POST", "/feeds/none/seen", json!({})).await.0, 404);
+    assert_eq!(f.api("GET", "/feeds/work/seen", json!(null)).await.0, 405);
+    let seen = f.cli(&["feed", "seen", "work"], "").await;
+    assert!(seen.status.success(), "{seen:?}");
+    assert_eq!(json_output(&seen), json!({"seen": 2}));
+    let (_, list) = f.api("GET", "/feeds", json!(null)).await;
+    assert_eq!(list[0]["unseen_count"], 0);
+    f.stop().await;
+    assert!(service.wait().await.unwrap().success());
+}

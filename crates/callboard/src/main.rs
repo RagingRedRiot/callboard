@@ -40,6 +40,9 @@ enum Command {
         name: String,
         #[arg(long)]
         title: Option<String>,
+        /// What the feed tracks, shown with it (at most 1000 characters).
+        #[arg(long)]
+        description: Option<String>,
         #[arg(long)]
         source_url: Option<String>,
         #[arg(long)]
@@ -125,6 +128,7 @@ async fn run(cli: Cli) -> Result<u8, Error> {
         Command::Put {
             name,
             title,
+            description,
             source_url,
             stale_after,
             exit_added,
@@ -144,6 +148,9 @@ async fn run(cli: Cli) -> Result<u8, Error> {
             let mut snapshot = parse_submission(&input)?;
             if title.is_some() {
                 snapshot.title = title;
+            }
+            if description.is_some() {
+                snapshot.description = description;
             }
             if source_url.is_some() {
                 snapshot.source_url = source_url;

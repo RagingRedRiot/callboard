@@ -247,6 +247,7 @@ async fn handle(
         ["", "feeds", name, "error"] if validate_feed_name(name).is_ok() => 3,
         ["", "feeds", name, "items", _key] if validate_feed_name(name).is_ok() => 4,
         ["", "feeds", name, "items", _key, "promote"] if validate_feed_name(name).is_ok() => 5,
+        ["", "feeds", name, "seen"] if validate_feed_name(name).is_ok() => 6,
         _ => return error(StatusCode::NOT_FOUND, "unknown resource"),
     };
     let allowed = match route {
@@ -269,7 +270,7 @@ async fn handle(
         };
     }
     let name = parts[2];
-    let item_key = if route >= 4 {
+    let item_key = if route == 4 || route == 5 {
         match decode_path_segment(parts[4]) {
             Ok(key) => key,
             Err(message) => return error(StatusCode::BAD_REQUEST, message),
@@ -290,7 +291,7 @@ async fn handle(
             Err(e) => storage_error(e),
         };
     }
-    let limit = if route == 3 || route == 4 || route == 5 {
+    let limit = if (3..=6).contains(&route) {
         16 * 1024
     } else {
         MAX_SNAPSHOT_BYTES
@@ -338,6 +339,26 @@ async fn handle(
         };
         return match store.patch_feed_item(name, &item_key, patch).await {
             Ok(v) => reply(StatusCode::OK, v),
+            Err(e) => storage_error(e),
+        };
+    }
+    if route == 6 {
+        /// No key marks every item seen.
+        #[derive(Deserialize, Default)]
+        #[serde(deny_unknown_fields)]
+        struct Seen {
+            key: Option<String>,
+        }
+        let seen: Seen = if body.iter().all(u8::is_ascii_whitespace) {
+            Seen::default()
+        } else {
+            match serde_json::from_slice(&body) {
+                Ok(v) => v,
+                Err(e) => return error(StatusCode::BAD_REQUEST, e),
+            }
+        };
+        return match store.mark_seen(name, seen.key.as_deref()).await {
+            Ok(n) => reply(StatusCode::OK, json!({ "seen": n })),
             Err(e) => storage_error(e),
         };
     }

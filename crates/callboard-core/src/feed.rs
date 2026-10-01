@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_ITEMS: usize = 1_000;
 pub const MAX_TITLE_CHARS: usize = 500;
+pub const MAX_DESCRIPTION_CHARS: usize = 1_000;
 pub const MAX_BODY_BYTES: usize = 16 * 1024;
 pub const MAX_TAGS: usize = 32;
 pub const MAX_META_KEYS: usize = 32;
@@ -38,6 +39,8 @@ pub struct Item {
 pub struct Snapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,6 +106,13 @@ impl Snapshot {
         {
             return Err(invalid("feed title exceeds 500 characters"));
         }
+        if self
+            .description
+            .as_ref()
+            .is_some_and(|s| s.chars().count() > MAX_DESCRIPTION_CHARS)
+        {
+            return Err(invalid("feed description exceeds 1000 characters"));
+        }
         if let Some(duration) = &self.stale_after {
             humantime::parse_duration(duration)
                 .map_err(|e| invalid(format!("invalid stale_after: {e}")))?;
@@ -142,6 +152,7 @@ pub fn parse_submission(input: &[u8]) -> Result<Snapshot, ValidationError> {
         None => return Err(invalid("empty input; use [] to explicitly clear a feed")),
         Some(b'[') => Snapshot {
             title: None,
+            description: None,
             source_url: None,
             stale_after: None,
             items: serde_json::from_slice(input)

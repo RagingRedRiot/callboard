@@ -23,8 +23,30 @@ SIGINT/SIGTERM drains requests and closes SQLite before releasing the data lock.
 To test in isolation, set absolute `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, and
 `CALLBOARD_SOCKET_DIR` paths under a private directory.
 
-`put` accepts arrays or full snapshot objects; `--title`, `--source-url`, and
-`--stale-after` override object metadata. Empty input fails; `[]` clears the feed.
+`put` accepts arrays or full snapshot objects; `--title`, `--description`,
+`--source-url`, and `--stale-after` override object metadata. Empty input
+fails; `[]` clears the feed.
+
+A full snapshot object for a tracking script, with a description saying what
+the feed is and per-item details for the GUI's hover card:
+
+```json
+{"title": "myrepo — review requests",
+ "description": "Open PRs in org/myrepo where I'm a requested reviewer",
+ "source_url": "https://github.com/org/myrepo/pulls",
+ "stale_after": "1h",
+ "items": [{"key": "https://github.com/org/myrepo/pull/42",
+            "title": "Fix auth race",
+            "url": "https://github.com/org/myrepo/pull/42",
+            "body": "Fixes the token refresh race in the session store.",
+            "tags": ["review-requested"],
+            "meta": {"author": "sam", "checks": "failing", "opened": "2026-09-27"}}]}
+```
+
+The service tracks what each submission changed: items are **new** or
+**updated** until seen, and the feed keeps its last change with the titles of
+removed items (DESIGN.md §4.3). Every field counts as content, so send stable
+values (an "opened" date, not an age) or items show as updated on every run.
 `--exit-added CODE` takes precedence over `--exit-changed CODE` when both match.
 Responses are JSON on stdout; errors go to stderr with a nonzero exit status.
 
@@ -64,6 +86,7 @@ printf '%s' '{"position":0}' | callboard feed patch reviews 'item-key'
 printf '%s' '{"reset_order":true}' | callboard feed patch reviews 'item-key'
 callboard feed promote reviews 'item-key' inbox
 callboard feed promote reviews 'item-key' inbox --kind note
+callboard feed seen reviews 'item-key'   # or omit the key to mark all seen
 printf '%s' '{"view":{"x":0,"y":0},"cards":[{"target":{"kind":"feed","name":"reviews"},"x":0,"y":0,"width":420,"height":520,"collapsed":false}]}' | callboard layout save 'Review day'
 callboard layouts
 callboard layout rename 'Review day' 'Reviews'
@@ -192,8 +215,11 @@ saved layout. Without any saved
 layout the window starts in an unnamed "Unsaved" arrangement. The
 deleted-board archive can be shown but is not stored in layouts.
 
-Feed items are compact rows: title and link. Rest the pointer on one for a
-second to see everything about it (body, tags, `meta` key/values, key). Its
+Feed items are compact rows: title and link, with a **new** or **updated**
+badge. Rest the pointer on one for a second to see everything about it (body,
+tags, `meta` key/values, key, when it was added and changed); that marks it
+seen. A feed card shows the feed's description and last change ("Changed 10m
+ago: 2 new · 1 gone"; hover for the gone titles) and **Mark all seen**. Its
 **…** menu has **Snooze** (for an hour, four hours, a day, a week, or until
 its content changes) and **Promote** (to a board as a todo or note). Snoozed
 items appear under **Show snoozed**, where the menu offers **Unsnooze**. A failed action shows a

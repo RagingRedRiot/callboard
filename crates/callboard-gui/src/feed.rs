@@ -7,7 +7,7 @@ use crate::{
 };
 use callboard_core::{
     feed::{Item, MetaValue},
-    store::{BoardSummary, Feed, ItemViewState},
+    store::{BoardSummary, ChangeStatus, Feed, ItemChange, ItemViewState, LastChange},
 };
 use eframe::egui;
 use std::time::Duration;
@@ -152,6 +152,18 @@ fn details(ui: &mut egui::Ui, feed: &Feed, item: &Item) {
     if let Some(url) = &item.url {
         link(ui, Some(url));
     }
+    if let Some(change) = feed.changes.get(&item.key)
+        && (change.status.is_some() || change.added_at_ms > 0)
+    {
+        ui.horizontal_wrapped(|ui| {
+            if let Some(status) = change.status {
+                badge(ui, status);
+            }
+            if let Some(text) = change_text(change) {
+                ui.weak(text);
+            }
+        });
+    }
     if let Some(state) = feed.view_state.get(&item.key).filter(|s| s.snoozed) {
         ui.weak(snooze_text(state));
     }
@@ -218,8 +230,30 @@ pub fn show(
         if stale(&feed.info) { " · stale" } else { "" }
     ));
     link(ui, feed.info.source_url.as_deref());
+    if let Some(description) = &feed.info.description {
+        ui.label(egui::RichText::new(description).italics());
+    }
     if let Some(error) = &feed.info.error {
         ui.colored_label(ui.visuals().error_fg_color, &error.message);
+    }
+    let unseen = feed.changes.values().filter(|c| c.status.is_some()).count();
+    if feed.info.last_change.is_some() || unseen > 0 {
+        ui.horizontal_wrapped(|ui| {
+            if let Some(change) = &feed.info.last_change {
+                last_change(ui, change);
+            }
+            if unseen > 0
+                && ui
+                    .small_button("Mark all seen")
+                    .on_hover_text("Clear the new and updated badges")
+                    .clicked()
+            {
+                actions.push(Action::Write(WriteOp::MarkSeen {
+                    feed: feed.info.name.clone(),
+                    key: None,
+                }));
+            }
+        });
     }
     let snoozed = feed
         .items
@@ -313,7 +347,15 @@ pub fn show(
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
                                     ui.set_width(width);
-                                    ui.label(egui::RichText::new(&item.title).strong());
+                                    let status = feed.changes.get(&item.key).and_then(|c| c.status);
+                                    if let Some(status) = status {
+                                        ui.horizontal_wrapped(|ui| {
+                                            badge(ui, status);
+                                            ui.label(egui::RichText::new(&item.title).strong());
+                                        });
+                                    } else {
+                                        ui.label(egui::RichText::new(&item.title).strong());
+                                    }
                                     if let Some(url) = &item.url {
                                         short_link(ui, url);
                                     }
@@ -354,11 +396,23 @@ pub fn show(
                 shown.push(&item.key);
                 rects.push(rect);
             }
+            let mut seen = Vec::new();
             let next = resting.map(|(row, rect, item)| {
                 let since = dwell.filter(|d| d.row == row).map_or(now, |d| d.since);
                 let waited = now - since;
                 if waited >= DWELL {
                     show_details(ui, row, rect, feed, item);
+                    // Seen once its details show; sent once per change.
+                    if let Some(change) = feed.changes.get(&item.key).filter(|c| c.status.is_some())
+                    {
+                        let sent_id = salt.with(("seen", &item.key));
+                        let sent = ui.data(|d| d.get_temp::<i64>(sent_id));
+                        let version = change.changed_at_ms.max(change.added_at_ms);
+                        if sent != Some(version) {
+                            ui.data_mut(|d| d.insert_temp(sent_id, version));
+                            seen.push(item.key.clone());
+                        }
+                    }
                 } else {
                     ui.ctx().request_repaint_after_secs((DWELL - waited) as f32);
                     // A line fills along the row's foot while the pointer rests.
@@ -374,6 +428,12 @@ pub fn show(
                 }
                 Dwell { row, since }
             });
+            for key in seen {
+                actions.push(Action::Write(WriteOp::MarkSeen {
+                    feed: feed.info.name.clone(),
+                    key: Some(key),
+                }));
+            }
             if next != dwell {
                 ui.data_mut(|d| match next {
                     Some(next) => {
@@ -425,4 +485,66 @@ fn show_details(ui: &egui::Ui, row: egui::Id, rect: egui::Rect, feed: &Feed, ite
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| details(ui, feed, item));
         });
+}
+
+/// A small "new" or "updated" pill.
+fn badge(ui: &mut egui::Ui, status: ChangeStatus) {
+    let (text, fill) = match status {
+        ChangeStatus::New => ("new", ui.visuals().selection.bg_fill),
+        ChangeStatus::Updated => ("updated", ui.visuals().warn_fg_color.gamma_multiply(0.6)),
+    };
+    egui::Frame::new()
+        .fill(fill)
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::symmetric(5, 0))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(text)
+                    .small()
+                    .color(ui.visuals().strong_text_color()),
+            )
+        });
+}
+
+/// "Added 2h ago · changed 10m ago"; none for items that predate change
+/// tracking (their times are 0).
+pub(crate) fn change_text(change: &ItemChange) -> Option<String> {
+    let ago = |at: i64| format!("{} ago", coarse(age(at)));
+    match (change.added_at_ms, change.changed_at_ms) {
+        (0, _) => None,
+        (added, changed) if changed > added => {
+            Some(format!("Added {} · changed {}", ago(added), ago(changed)))
+        }
+        (added, _) => Some(format!("Added {}", ago(added))),
+    }
+}
+
+/// "Changed 10m ago: 2 new · 1 updated · 1 gone", with the gone titles on hover.
+fn last_change(ui: &mut egui::Ui, change: &LastChange) {
+    let parts: Vec<String> = [
+        (change.added, "new"),
+        (change.updated, "updated"),
+        (change.removed, "gone"),
+    ]
+    .iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, what)| format!("{n} {what}"))
+    .collect();
+    let response = ui.weak(format!(
+        "Changed {} ago: {}",
+        coarse(age(change.at_ms)),
+        parts.join(" · ")
+    ));
+    if !change.removed_items.is_empty() {
+        response.on_hover_ui(|ui| {
+            ui.strong("Gone in that change");
+            for item in &change.removed_items {
+                ui.label(&item.title);
+            }
+            let more = change.removed.saturating_sub(change.removed_items.len());
+            if more > 0 {
+                ui.weak(format!("and {more} more"));
+            }
+        });
+    }
 }

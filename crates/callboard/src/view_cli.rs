@@ -19,6 +19,11 @@ pub enum FeedCommand {
         name: String,
         key: String,
     },
+    /// Mark one item, or every item, of a feed seen (no longer new or updated).
+    Seen {
+        name: String,
+        key: Option<String>,
+    },
     /// Copy an item into a board, retaining its source reference.
     Promote {
         name: String,
@@ -112,6 +117,14 @@ pub async fn feed(
                 method: "PATCH",
                 resource: format!("/feeds/{name}/items/{}", segment(&key)),
                 body,
+            })
+        }
+        FeedCommand::Seen { name, key } => {
+            validate_feed_name(&name)?;
+            Ok(Request {
+                method: "POST",
+                resource: format!("/feeds/{name}/seen"),
+                body: serde_json::to_vec(&serde_json::json!({ "key": key }))?,
             })
         }
         FeedCommand::Promote {

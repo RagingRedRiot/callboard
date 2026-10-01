@@ -859,7 +859,30 @@ themes.
   when the pointer leaves, not for half-second passes between rows, and not
   while a menu is open; existing snooze/promote tests use the menu.
 
+## Feed descriptions and change tracking
+
+- DESIGN.md §3.1 (`description`), §4.3 (changes and seen), §6.2, §8.1.
+  Migration 0008 adds `feeds.description` and `last_change_json`, and per-item
+  `added_at_ms`, `changed_at_ms`, and nullable `seen_at_ms`; existing items
+  count as seen with times 0. A feed's first submission is its baseline
+  (seen, no last change). `submit` records the last change (counts and up to
+  20 removed key/titles) only when something changed; identical resubmits
+  keep it.
+- API: `FeedInfo` gains `description` and `last_change`; `GET /feeds/{name}`
+  gains `changes` (per key: added/changed times and `status`); `GET /feeds`
+  gains `unseen_count`; `POST /feeds/{name}/seen` (`{}` or `{"key"}`) marks
+  seen and emits a feed notice. CLI: `put --description`, `feed seen NAME
+  [KEY]`.
+- GUI: the card shows the description, "Changed 10m ago: 1 new · 1 gone"
+  (gone titles on hover), and Mark all seen; rows carry new/updated badges;
+  the details card adds the badge and added/changed times, and showing it
+  marks the item seen (once per change); the sidebar shows "N new".
+- Tests: store lifecycle (baseline, new/updated/removed, identical resubmit,
+  seen one and all, re-update, errors), the 1000-character limit, upgrade from
+  a version-7 database, the HTTP route and CLI, and GUI tests for the header,
+  badges, Mark all seen, and marking seen from the details card once.
+- Restart the service to pick up migration 0008 and the new route.
+
 ## Suggested next
 
-Feed `description`, and change tracking (new/updated badges cleared by
-opening an item's details or Mark all seen; a last-change line).
+Polish from real use with a real tracking script (a GitHub query feed).
