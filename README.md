@@ -1,282 +1,113 @@
+<div align="center">
+
 # callboard
 
-A Linux per-user bulletin board for tool-submitted feeds, todos, and notes.
-[DESIGN.md](DESIGN.md) describes the intended application.
+**A bulletin board for your scripts, todos, and notes, on your Linux desktop.**
 
-The Linux service and CLI support feeds, boards, todos, and notes, backed by
-SQLite through SQLx. The API also provides layouts, promotion, feed view state,
-and change events. A desktop GUI (managing layouts, snoozing, and promoting feed items) is available; MCP is not implemented
-yet.
+Scripts post what they find. callboard tracks what's new, and keeps it on a canvas beside your boards.
 
-```sh
-cargo build -p callboard
-printf '%s' '[{"key":"example","title":"Review this"}]' | target/debug/callboard put reviews
-target/debug/callboard feeds
-target/debug/callboard get reviews
-target/debug/callboard fail reviews 'Fetch failed'
-target/debug/callboard feed rm reviews
-```
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Rust 1.98+](https://img.shields.io/badge/rust-1.98%2B-orange)](https://www.rust-lang.org/)
+[![Platform: Linux](https://img.shields.io/badge/platform-Linux-lightgrey)](#quick-start)
 
-Commands start the service automatically when needed. Use `--no-auto-start` to
-require an existing service, or `callboard serve` to run it in the foreground.
-SIGINT/SIGTERM drains requests and closes SQLite before releasing the data lock.
-To test in isolation, set absolute `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, and
-`CALLBOARD_SOCKET_DIR` paths under a private directory.
+[Quick start](#quick-start) · [How it works](#how-it-works) · [Command line](docs/cli.md) · [Desktop app](docs/gui.md) · [Design](DESIGN.md) · [Development](docs/development.md)
 
-`put` accepts arrays or full snapshot objects; `--title`, `--description`,
-`--source-url`, `--stale-after`, and `--new-for` override object metadata. Empty input
-fails; `[]` clears the feed.
+</div>
 
-A full snapshot object for a tracking script, with a description saying what
-the feed is and per-item details for the GUI's hover card:
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/canvas-dark.png">
+  <img alt="The callboard desktop app: feed cards for review requests, nightly builds, and upstream releases beside two boards of todos and notes" src="docs/assets/canvas-light.png">
+</picture>
 
-```json
-{"title": "myrepo — review requests",
- "description": "Open PRs in org/myrepo where I'm a requested reviewer",
- "source_url": "https://github.com/org/myrepo/pulls",
- "stale_after": "1h",
- "new_for": "24h",
- "items": [{"key": "https://github.com/org/myrepo/pull/42",
-            "title": "Fix auth race",
-            "url": "https://github.com/org/myrepo/pull/42",
-            "body": "Fixes the token refresh race in the session store.",
-            "tags": ["review-requested"],
-            "meta": {"author": "sam", "checks": "failing", "opened": "2026-09-27"},
-            "color": "red"}]}
-```
+Anything a script can fetch can be a feed: pull requests waiting on you, last
+night's builds, new releases of the tools you pin. Each run submits the whole
+list, and callboard works out what changed. Beside the feeds you keep boards of
+todos and notes, and the desktop app lays them all out as cards you arrange
+and save.
 
-`new_for` sets how long items show as **new** after they first appear, or
-**updated** after their content last changed; without it nothing is marked.
-The marks follow time alone and end by themselves. `color` (red, orange,
-yellow, green, blue, purple, pink, or gray) tints the item's row, so a script
-can color by state (failing checks red). The feed also keeps its last change
-with the titles of removed items (DESIGN.md §4.3). Every field, `color`
-included, counts as content, so send stable values (an "opened" date, not an
-age) or items show as updated on every run. A feed's first submission is its
-baseline: its items are not marked new.
-`--exit-added CODE` takes precedence over `--exit-changed CODE` when both match.
-Responses are JSON on stdout; errors go to stderr with a nonzero exit status.
+- **Feeds from any script.** Pipe a JSON list to `callboard put` and callboard
+  diffs it against the last run: new and updated items are marked, removed ones
+  remembered, and an exit code tells your scheduler when something arrived.
+- **Boards for the rest.** Todos and notes, with colors, archives, and promotion
+  from any feed item in one drag.
+- **A canvas you arrange.** Cards overlap, resize, and collapse; layouts save
+  automatically, and Ctrl+K finds any feed, board, or layout.
+- **Live everywhere.** Every write reaches every open window at once, from the
+  CLI, a script, or another window.
+- **Private to your account.** A per-user service on a Unix socket checks each
+  peer's UID with the kernel. There is no network listener.
+- **Upgrades in place.** `callboard upgrade` moves the running service onto a new
+  build without a restart or a dropped request.
 
-Board and item commands return JSON:
+## Quick start
+
+Requires Linux and Rust 1.98 or newer; the desktop app also needs Wayland or X11
+with OpenGL.
 
 ```sh
-callboard board add inbox
-callboard boards
-callboard todo add inbox 'Reply about the migration' --body 'Check the rollout plan'
-callboard note add inbox 'Release freeze starts Thursday' --title 'Release'
-callboard board get inbox
-# Use the item ID returned by add:
-callboard todo done 1
-callboard todo done 1 --undone
-printf '%s' '{"body":null,"title":"Updated title"}' | callboard todo patch 1
-callboard note archive 1
-callboard board archive inbox
-callboard note restore 1 inbox
-```
-
-`board get/rename/rm/archive`, item `add`, and item `move/restore` accept a board
-ID or exact name. Numeric selectors mean IDs; use `boards` to find the ID of a
-board with a numeric name. Item IDs are always positive integers. Both `todo`
-and `note` support `patch`, `archive`, `restore`, `move`, and `rm`. PATCH reads a
-JSON object from stdin; omitted fields are preserved and nullable fields can be
-cleared with `null`. The API's field names and limits apply.
-
-`board rm BOARD` refuses nonempty boards; `--archive-contents` preserves their
-items in the system archive, available through `callboard archive`. Item `rm`
-permanently deletes that item. `board rename BOARD NAME` changes a board name.
-
-Feed view controls and layouts are also available from the CLI:
-
-```sh
-printf '%s' '{"wake_on_update":true}' | callboard feed patch reviews 'item-key'
-printf '%s' '{"position":0}' | callboard feed patch reviews 'item-key'
-printf '%s' '{"reset_order":true}' | callboard feed patch reviews 'item-key'
-callboard feed promote reviews 'item-key' inbox
-callboard feed promote reviews 'item-key' inbox --kind note
-printf '%s' '{"view":{"x":0,"y":0},"cards":[{"target":{"kind":"feed","name":"reviews"},"x":0,"y":0,"width":420,"height":520,"collapsed":false}]}' | callboard layout save 'Review day'
-callboard layouts
-callboard layout rename 'Review day' 'Reviews'
-callboard layout rm 'Reviews'
-```
-
-Pass literal item keys and layout names, including URLs, Unicode, and `%`;
-the CLI encodes them for the API. Feed PATCH accepts `snoozed_until_ms` (UTC Unix
-milliseconds or null), `wake_on_update`, `position`, and `reset_order`. To clear
-both snooze conditions, send `{"snoozed_until_ms":null,"wake_on_update":false}`.
-Feed patch input is limited to 16 KiB. `layout save NAME` accepts a layout
-object (`view` and back-to-front `cards`) up to 64 KiB and replaces that layout
-atomically. `layouts` returns all saved layouts. `layout rename` never replaces
-an existing layout, and `layout rm` reports whether the layout existed. See
-DESIGN.md §6.4 for the layout schema. These commands support
-`--no-auto-start` and the same JSON output/error conventions as other commands.
-
-From a stable installed binary path, `callboard setup --print` previews the
-systemd unit. `callboard setup` installs it and enables it for future logins;
-it does not take over an already running on-demand service. If no service is
-running, start the unit with `systemctl --user start callboard.service`.
-The unit records the executable and resolved data/config/socket paths. Keep
-the executable at that location, and rerun setup after moving it. Existing
-custom units are preserved. Custom XDG config locations must also be visible
-to your systemd user manager. `callboard setup --status` reports the unit and
-its systemd state; `callboard setup --uninstall` disables and deletes it.
-
-### Upgrade
-
-Install the new build over the old one, then move the running service onto it:
-
-```sh
+git clone https://github.com/RagingRedRiot/callboard.git
+cd callboard
 cargo install --path crates/callboard --locked
 cargo install --path crates/callboard-gui --locked
-callboard upgrade
 ```
 
-The service finishes in-flight requests and re-executes the installed binary in
-place, keeping its PID, socket, systemd supervision, and store; migrations run
-as it starts. Requests made meanwhile wait and are then served. A binary that
-fails `--version` is refused and nothing changes. Reopen any open
-`callboard-gui` window to load the new GUI; the status bar shows "Version
-mismatch" while a window and the service are different builds.
-
-### Uninstall
+Post a feed and open the board:
 
 ```sh
-callboard uninstall          # add --purge to remove ~/.config/callboard too
-cargo uninstall callboard callboard-gui
+printf '%s' '[{"key":"pr-42","title":"Fix auth race","url":"https://github.com/org/repo/pull/42"}]' \
+  | callboard put reviews --title "Review requests" --new-for 24h
+callboard board add Inbox
+callboard todo add Inbox "Reply about the migration"
+callboard-gui
 ```
 
-`uninstall` lists what it will remove and asks first: the systemd unit, the
-running service, and the data directory with every feed, board, todo, note,
-layout, and the archive, plus the socket. Config is kept unless you pass
-`--purge`. Close `callboard-gui` first; an open window would start a fresh,
-empty service. Off a terminal, `--yes` is required.
+The service starts on demand and keeps running after the window closes. To start
+it at login instead, run `callboard setup` (a systemd user unit).
 
-Use a current stable Rust toolchain (tested with Rust 1.98.1):
+## How it works
+
+A small service owns a SQLite store under `~/.local/share/callboard` and serves
+a JSON API on a private Unix socket. The CLI, your scripts, and the desktop app
+are all clients of it, and the app follows a stream of change events, so what
+you see is always current.
+
+A feed is identified by name and replaced as a whole on each submission. A
+tracking script is usually a fetch piped into `put`:
 
 ```sh
-python3 scripts/checks.py --local
+gh search prs --review-requested=@me --state open --json url,title \
+    --jq 'map({key: .url, title, url})' \
+  | callboard put reviews --title "Review requests" --stale-after 1h --exit-added 10
 ```
 
-This runs all local checks, including container tests with two real Linux UIDs.
-Docker is required; missing prerequisites fail rather than skip. For the trusted
-base runner and base-branch control gate required before merging, see
-[Local merge checks](docs/merge-checks.md). Individual Rust checks remain:
+`--exit-added 10` exits with 10 when new items arrived, so a scheduler such as
+[cued](https://github.com/RagingRedRiot/cued) can notify you only then. If the
+fetch fails, `callboard fail reviews "message"` marks the feed without touching
+its items.
+
+## Documentation
+
+| | |
+|---|---|
+| [Command line](docs/cli.md) | Feeds, snapshot format, boards and items, layouts, the service, upgrade and uninstall |
+| [Desktop app](docs/gui.md) | The canvas, cards, live updates, and saved layouts |
+| [Design](DESIGN.md) | Concepts, API, events, security model, and lifecycle |
+| [Development](docs/development.md) | Building, tests, local checks, and the [merge gate](docs/merge-checks.md) |
+
+## Upgrade and uninstall
 
 ```sh
-cargo test --workspace
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+git pull && cargo install --path crates/callboard --locked && cargo install --path crates/callboard-gui --locked
+callboard upgrade            # switch the running service to the new build
+callboard uninstall          # remove the service, unit, and all data (--purge for config too)
 ```
 
-`callboard_core::store::Store::open(path)` opens a file-backed database in WAL
-mode and applies embedded SQLx migrations. Run it inside a Tokio runtime and
-provide an existing private parent directory. The store supports submitting,
-reading, listing, deleting, and recording fetch errors for feeds. Snapshot
-replacement is atomic and returns added/removed/updated/unchanged counts and
-changed keys. Call `close().await` to release its connection pool explicitly.
+## Status
 
-No database server, `DATABASE_URL`, or SQLx CLI is required to build or test.
-Storage tests use temporary SQLite files, including rollback, reopen, and
-concurrent access checks. Runtime queries are checked by integration tests;
-migrations are embedded at compile time.
+callboard is alpha software. The API and storage may
+change between versions; `callboard upgrade` migrates your data in place. MCP
+access for AI assistants is designed (DESIGN.md §9.3) but not implemented yet.
 
-On Linux, `callboard::lifecycle` provides environment-based `Paths` resolution
-and `ServiceGuard::bind(paths)`. The guard creates private directories, holds the
-data lock, prepares the database file, and binds a nonblocking Unix listener.
-Keep the guard alive until the SQLx pool and request handlers have shut down.
-Dropping it removes its socket and releases the lock. The HTTP service checks
-the kernel peer UID before reading requests, and the client checks the server's
-UID. It exposes health, feeds, boards/items, layouts, and SSE change events;
-see DESIGN.md for the API contract.
-HTTP snapshots require an object containing `items`; array input is a CLI feature.
-Snapshot bodies are capped at 4 MiB, failure reports at 16 KiB, and client
-responses at 16 MiB. Connections have deadlines and a 64-connection limit.
+## License
 
-Lifecycle tests bind local Unix sockets and spawn a child process to verify
-lock contention and crash recovery. Run them with normal Linux filesystem
-ownership and Unix-socket access; restrictive sandboxes may deny these operations.
-
-The eframe/egui desktop preview lists feeds and boards and displays their
-contents, feed errors/staleness, snoozed items, and source-reference status.
-The GUI starts `callboard serve` on demand when it cannot connect, then leaves
-the service running if the window closes. It locates the service executable as
-`callboard` beside the GUI binary or on `PATH`. Set `CALLBOARD_EXECUTABLE` to a
-specific executable path to override lookup. For example, during development:
-
-```sh
-cargo build -p callboard -p callboard-gui
-target/debug/callboard-gui
-```
-
-`callboard-gui --no-auto-start` requires an existing service. Both processes
-must use the same XDG and CALLBOARD_SOCKET_DIR settings. Auto-start uses the
-same kernel UID checks, data lock, and process lifecycle as CLI requests.
-
-The window is a canvas of cards, one per feed or board (DESIGN.md §6.1).
-Cards overlap; clicking anywhere on a card brings it to the front. Drag a
-card's title bar to move it, drag its right or bottom edge or corner to resize
-it, **−** collapses it to its title bar (which keeps showing counts) and **+**
-expands it, and **×** removes it from the layout. **Show…** in the title bar
-points the card at another feed or board; targets that already have a card are
-disabled. A long feed scrolls inside its card.
-
-Drag empty canvas, or use the wheel over it (Shift + wheel for horizontal), to
-pan; over a card, the wheel scrolls that card. **Show all** in the layout bar
-pans back to the cards. Clicking a sidebar entry pans to its card or places a
-new one in the middle of the view; **Add card…** offers the same, the
-right-click menu can also remove a card, and dragging an entry onto the canvas
-places its card at the drop point. The sidebar lists saved layouts, feeds with
-error/stale markers, and boards, each with its item count (visible and snoozed
-for feeds). **Ctrl+K** (or **Open…** in the layout bar) finds a feed,
-board, or layout by name: type part of it, pick with Up/Down or the pointer,
-and press Enter to reveal or place the card, or to switch layouts. The GUI
-opens the layout that was active when it last ran, or else
-the first saved layout by name. Cards whose feed or board was deleted stay in
-place as placeholders.
-
-The GUI subscribes to `GET /events` and refetches only what changed, handling
-the initial resync, lag resyncs, and reconnects with backoff. Routine stream
-rotation does not refetch everything; see DESIGN.md §6.5. While the stream is
-down for more than two seconds it polls every five seconds instead; the status
-bar shows Live, Connecting, or Polling. A failed refetch keeps a card's last
-loaded contents and retries that card alone after five seconds. HTTP(S) links
-open only when clicked; other URL schemes display as text.
-
-Arrangement changes save to the active layout automatically after a
-one-second pause (`PUT /layouts/{name}`); the layout bar shows saving, saved,
-or a failed save that is retried. Closing the window flushes pending named-layout
-changes and waits for confirmation; if saving fails, you can retry, keep the
-window open, or explicitly close without waiting. **Save as…** stores the current arrangement
-under a new name and **New layout…** creates an empty one. **Rename…** and
-**Delete…** act on the active saved layout; deleting it switches to the next
-saved layout. Without any saved
-layout the window starts in an unnamed "Unsaved" arrangement. The
-deleted-board archive can be shown but is not stored in layouts.
-
-Feed items are compact rows: title and link, tinted with the item's color,
-with a **new** or **updated** badge inside the feed's `new_for` window. Rest
-the pointer on one for a second to see everything about it (body, tags, `meta`
-key/values, color, key, when it was added and changed). A feed card shows the
-feed's description and last change ("Changed 10m ago: 2 new · 1 gone"; hover
-for the gone titles). Its
-**…** menu has **Snooze** (for an hour, four hours, a day, a week, or until
-its content changes) and **Promote** (to a board as a todo or note). Snoozed
-items appear under **Show snoozed**, where the menu offers **Unsnooze**. A failed action shows a
-dismissible message under the layout bar.
-
-Board cards are editable (DESIGN.md §6.3). Type into **Add a todo** or **Add a
-note** and press Enter; tick a todo's checkbox to mark it done. Each item's
-**…** menu edits it in place (title, details, link, and color),
-moves it to another board, archives it, or deletes it after confirmation. Drag
-the dotted handle at an item's left to reorder it. **Show archived** lists
-archived items with **Restore**. The **Board** menu renames the board, sets its color (tinting its title bar),
-archives its done todos, or deletes it (its items move to the deleted-board
-archive, whose card restores them to a chosen board). **New board…** in the
-sidebar creates a board and places its card. Drag a feed item by its dotted
-handle within its feed to reorder it (**Reset order** returns to the feed's
-own order), or onto a board card to promote it: over the notes it becomes a note,
-anywhere else on the card a todo (Escape cancels).
-
-Graphics dependencies are confined to the GUI
-crate; building `callboard` alone does not build eframe. A Wayland or X11 desktop
-with OpenGL support is required to launch the window.
-See [PROGRESS.md](PROGRESS.md) for session scope and the next step.
+[MIT](LICENSE)

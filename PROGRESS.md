@@ -952,6 +952,28 @@ themes.
   unsafe code, and `checks.py` runs rustfmt on them, since cargo fmt does not
   follow generated module paths. Migrations stay fully guarded.
 
+## Presentation
+
+- Applied the layout that recent top-starred GitHub repos share (researched in
+  the cued session): a landing-page first screen, with the detail after it. The
+  README is now a centered text header with a tagline, static badges (license,
+  Rust, Linux; GitHub-data badges stay off while the repo is private), a
+  navigation row, a canvas screenshot in light and dark (`<picture>`), a pitch
+  with bold-led feature bullets, an install-first quick start (verified in an
+  isolated deployment), and a short "How it works".
+- The reference material moved, mostly verbatim, to `docs/cli.md`,
+  `docs/gui.md` (now with section headings), and `docs/development.md`.
+- MIT `LICENSE` (as cued). GitHub topics and description set.
+- Screenshots: rendered headlessly with egui_kittest's wgpu renderer, from the
+  real app against an isolated service seeded with demo data, in a scratch
+  worktree (not committed); transparent margins trimmed. To re-render, seed a
+  service, build the service and GUI from the same tree so the builds match
+  (otherwise the status bar shows "Version mismatch"), and render at
+  1200x830 points, 1.5x scale.
+- Not yet: Cargo `license` metadata (a guarded file; left for the next guarded
+  change so this PR needs no control review), the app icon and social preview
+  (being designed separately), and a window icon in the GUI once the icon exists.
+
 ## Suggested next
 
 Polish from real use with a real tracking script (a GitHub query feed).
