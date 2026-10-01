@@ -47,6 +47,9 @@ enum Command {
         source_url: Option<String>,
         #[arg(long)]
         stale_after: Option<String>,
+        /// How long items show as new or updated, e.g. 24h (default: never).
+        #[arg(long)]
+        new_for: Option<String>,
         /// Exit with this code if new items were added (takes precedence).
         #[arg(long, value_parser = clap::value_parser!(u8).range(1..))]
         exit_added: Option<u8>,
@@ -131,6 +134,7 @@ async fn run(cli: Cli) -> Result<u8, Error> {
             description,
             source_url,
             stale_after,
+            new_for,
             exit_added,
             exit_changed,
         } => {
@@ -157,6 +161,9 @@ async fn run(cli: Cli) -> Result<u8, Error> {
             }
             if stale_after.is_some() {
                 snapshot.stale_after = stale_after;
+            }
+            if new_for.is_some() {
+                snapshot.new_for = new_for;
             }
             snapshot.validate()?;
             let body = serde_json::to_vec(&snapshot)?;

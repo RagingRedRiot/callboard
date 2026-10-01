@@ -1,7 +1,8 @@
-//! Feed descriptions and change tracking (DESIGN.md §3.1, §4.3).
+//! Feed descriptions, item colors, and change tracking (DESIGN.md §3, §4.3).
 use callboard_core::feed::{Snapshot, parse_submission};
-use callboard_core::store::{Change, ChangeStatus, RemovedItem, Store, StoreError};
+use callboard_core::store::{ChangeStatus, ItemChange, RemovedItem, Store};
 use serde_json::{Value, json};
+use std::time::Duration;
 
 fn snapshot(value: Value) -> Snapshot {
     parse_submission(&serde_json::to_vec(&value).unwrap()).unwrap()
@@ -20,34 +21,69 @@ async fn status(store: &Store, key: &str) -> Option<ChangeStatus> {
     store.feed("work").await.unwrap().unwrap().changes[key].status
 }
 
-async fn unseen(store: &Store) -> usize {
-    store.feed_summaries().await.unwrap()[0].unseen_count
+async fn new_count(store: &Store) -> usize {
+    store.feed_summaries().await.unwrap()[0].new_count
+}
+
+#[test]
+fn marks_follow_the_window_from_added_and_changed_times() {
+    let hour = Some(3_600_000);
+    let at = |added, changed| ItemChange {
+        added_at_ms: added,
+        changed_at_ms: changed,
+        status: None,
+    };
+    let now = 10_000_000;
+    // New for the window after it was added, wherever it changed since.
+    assert_eq!(
+        at(now - 1000, now - 500).status_at(hour, now),
+        Some((ChangeStatus::New, now - 1000 + 3_600_000))
+    );
+    // Then updated for the window after its last change.
+    assert_eq!(
+        at(now - 5_000_000, now - 1000).status_at(hour, now),
+        Some((ChangeStatus::Updated, now - 1000 + 3_600_000))
+    );
+    assert_eq!(
+        at(now - 5_000_000, now - 5_000_000).status_at(hour, now),
+        None
+    );
+    // Baseline items (added 0) are never new, but can be updated.
+    assert_eq!(at(0, 0).status_at(hour, now), None);
+    assert_eq!(
+        at(0, now - 1000).status_at(hour, now).map(|(s, _)| s),
+        Some(ChangeStatus::Updated)
+    );
+    // No window, or a zero one: never marked.
+    assert_eq!(at(now - 1000, now - 1000).status_at(None, now), None);
+    assert_eq!(at(now - 1000, now - 1000).status_at(Some(0), now), None);
 }
 
 #[tokio::test]
-async fn submissions_record_new_updated_and_removed_items_until_seen() {
+async fn submissions_mark_items_within_the_feeds_window() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path().join("db.sqlite3")).await.unwrap();
     let first = json!({
         "title": "Work",
         "description": "Open PRs awaiting my review",
+        "new_for": "1h",
         "items": items(&[("a", "A"), ("b", "B")]),
     });
     store.submit("work", &snapshot(first)).await.unwrap();
-    // The first submission is the baseline: seen, and no change to report.
+    // The first submission is the baseline: nothing new, no change reported.
     let feed = store.feed("work").await.unwrap().unwrap();
     assert_eq!(
         feed.info.description.as_deref(),
         Some("Open PRs awaiting my review")
     );
+    assert_eq!(feed.info.new_for.as_deref(), Some("1h"));
     assert_eq!(feed.info.last_change, None);
     assert!(feed.changes.values().all(|c| c.status.is_none()));
-    assert!(feed.changes["a"].added_at_ms > 0);
-    assert_eq!(unseen(&store).await, 0);
+    assert_eq!(new_count(&store).await, 0);
 
-    // a updated, b removed, c added; the description is dropped.
-    let second = json!({"items": [
-        {"key": "a", "title": "A", "body": "new body"},
+    // a updated (its color counts as content), b removed, c added.
+    let second = json!({"new_for": "1h", "items": [
+        {"key": "a", "title": "A", "color": "red"},
         {"key": "c", "title": "C"},
     ]});
     store
@@ -55,7 +91,8 @@ async fn submissions_record_new_updated_and_removed_items_until_seen() {
         .await
         .unwrap();
     let feed = store.feed("work").await.unwrap().unwrap();
-    assert_eq!(feed.info.description, None);
+    assert_eq!(feed.info.description, None, "replaced by each submission");
+    assert_eq!(feed.items[0].color.as_deref(), Some("red"));
     let change = feed.info.last_change.clone().expect("a last change");
     assert_eq!((change.added, change.updated, change.removed), (1, 1, 1));
     assert_eq!(
@@ -66,9 +103,12 @@ async fn submissions_record_new_updated_and_removed_items_until_seen() {
         }]
     );
     assert_eq!(feed.changes["a"].status, Some(ChangeStatus::Updated));
-    assert!(feed.changes["a"].changed_at_ms >= feed.changes["a"].added_at_ms);
     assert_eq!(feed.changes["c"].status, Some(ChangeStatus::New));
-    assert_eq!(unseen(&store).await, 2);
+    let summary = &store.feed_summaries().await.unwrap()[0];
+    assert_eq!(summary.new_count, 2);
+    // The list says when its counts next change: when the marks end.
+    let ends = summary.next_wake_at_ms.expect("a deadline");
+    assert!(ends > feed.changes["c"].added_at_ms);
 
     // An identical resubmission changes nothing, including the last change.
     store.submit("work", &snapshot(second)).await.unwrap();
@@ -76,46 +116,41 @@ async fn submissions_record_new_updated_and_removed_items_until_seen() {
     assert_eq!(again.info.last_change, Some(change));
     assert_eq!(again.changes, feed.changes);
 
-    // Seeing one item, then all of them; each emits a feed notice.
-    let mut notices = store.subscribe();
-    assert_eq!(store.mark_seen("work", Some("c")).await.unwrap(), 1);
-    assert!(matches!(notices.try_recv(), Ok(Change::Feed { name }) if name == "work"));
+    // Without a window nothing is marked; a short one ends.
+    let unmarked =
+        json!({"items": [{"key": "a", "title": "A", "color": "red"}, {"key": "c", "title": "C"}]});
+    store.submit("work", &snapshot(unmarked)).await.unwrap();
     assert_eq!(status(&store, "c").await, None);
-    assert_eq!(status(&store, "a").await, Some(ChangeStatus::Updated));
-    assert_eq!(store.mark_seen("work", None).await.unwrap(), 2);
-    assert_eq!(unseen(&store).await, 0);
-
-    // A later change marks it updated again.
-    std::thread::sleep(std::time::Duration::from_millis(5));
-    let third = json!({"items": [
-        {"key": "a", "title": "A", "body": "newer body"},
-        {"key": "c", "title": "C"},
-    ]});
-    store.submit("work", &snapshot(third)).await.unwrap();
-    assert_eq!(status(&store, "a").await, Some(ChangeStatus::Updated));
-    assert_eq!(status(&store, "c").await, None);
-
-    assert!(matches!(
-        store.mark_seen("work", Some("missing")).await,
-        Err(StoreError::FeedItemNotFound { .. })
-    ));
-    assert!(matches!(
-        store.mark_seen("nope", None).await,
-        Err(StoreError::FeedNotFound(_))
-    ));
+    let short = json!({"new_for": "50ms", "items": [{"key": "d", "title": "D"}]});
+    store.submit("work", &snapshot(short)).await.unwrap();
+    assert_eq!(status(&store, "d").await, Some(ChangeStatus::New));
+    std::thread::sleep(Duration::from_millis(80));
+    assert_eq!(status(&store, "d").await, None);
+    assert_eq!(new_count(&store).await, 0);
     store.close().await;
 }
 
-#[tokio::test]
-async fn descriptions_are_limited_to_1000_characters() {
+#[test]
+fn submissions_validate_description_window_and_color() {
+    let refused = |value: Value| {
+        parse_submission(&serde_json::to_vec(&value).unwrap())
+            .unwrap_err()
+            .to_string()
+    };
     let long = "x".repeat(1001);
-    let input = serde_json::to_vec(&json!({"description": long, "items": []})).unwrap();
-    let error = parse_submission(&input).unwrap_err();
-    assert!(error.to_string().contains("description"), "{error}");
+    assert!(refused(json!({"description": long, "items": []})).contains("description"));
+    assert!(refused(json!({"new_for": "soon", "items": []})).contains("new_for"));
+    let error = refused(json!({"items": [{"key": "a", "title": "A", "color": "teal"}]}));
+    assert!(error.contains("item 0: color must be"), "{error}");
+    for color in [
+        "red", "orange", "yellow", "green", "blue", "purple", "pink", "gray",
+    ] {
+        snapshot(json!({"items": [{"key": "a", "title": "A", "color": color}]}));
+    }
 }
 
 #[tokio::test]
-async fn items_from_before_tracking_count_as_seen() {
+async fn items_from_before_tracking_are_never_new() {
     use sqlx::{Connection, sqlite::SqliteConnectOptions};
     let dir = tempfile::tempdir().unwrap();
     let migrations = dir.path().join("migrations");
@@ -179,12 +214,16 @@ async fn items_from_before_tracking_count_as_seen() {
     let store = Store::open(&path).await.unwrap();
     let feed = store.feed("work").await.unwrap().unwrap();
     assert_eq!(feed.info.description, None);
+    assert_eq!(feed.info.new_for, None);
     assert_eq!(feed.info.last_change, None);
-    let change = feed.changes["a"];
-    assert_eq!((change.added_at_ms, change.status), (0, None));
-    // Not the first submission any more: a new key is new.
-    let next = json!({"items": items(&[("a", "A"), ("b", "B")])});
+    assert_eq!(feed.changes["a"].added_at_ms, 0);
+    // Not a first submission any more: a new key is new, and a changed old
+    // item is updated.
+    let next = json!({"new_for": "1h", "items": [
+        {"key": "a", "title": "A2"}, {"key": "b", "title": "B"},
+    ]});
     store.submit("work", &snapshot(next)).await.unwrap();
+    assert_eq!(status(&store, "a").await, Some(ChangeStatus::Updated));
     assert_eq!(status(&store, "b").await, Some(ChangeStatus::New));
     store.close().await;
 }

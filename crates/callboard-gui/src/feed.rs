@@ -7,7 +7,7 @@ use crate::{
 };
 use callboard_core::{
     feed::{Item, MetaValue},
-    store::{BoardSummary, ChangeStatus, Feed, ItemChange, ItemViewState, LastChange},
+    store::{BoardSummary, ChangeStatus, Feed, ItemChange, ItemViewState, LastChange, window_ms},
 };
 use eframe::egui;
 use std::time::Duration;
@@ -153,10 +153,10 @@ fn details(ui: &mut egui::Ui, feed: &Feed, item: &Item) {
         link(ui, Some(url));
     }
     if let Some(change) = feed.changes.get(&item.key)
-        && (change.status.is_some() || change.added_at_ms > 0)
+        && change.added_at_ms > 0
     {
         ui.horizontal_wrapped(|ui| {
-            if let Some(status) = change.status {
+            if let Some(status) = status(feed, &item.key) {
                 badge(ui, status);
             }
             if let Some(text) = change_text(change) {
@@ -198,7 +198,11 @@ fn details(ui: &mut egui::Ui, feed: &Feed, item: &Item) {
             });
     }
     ui.add_space(4.0);
-    ui.weak(egui::RichText::new(format!("Key: {}", item.key)).small());
+    let key = match &item.color {
+        Some(color) => format!("Key: {} · color: {color}", item.key),
+        None => format!("Key: {}", item.key),
+    };
+    ui.weak(egui::RichText::new(key).small());
 }
 
 fn meta_text(value: &MetaValue) -> String {
@@ -236,24 +240,8 @@ pub fn show(
     if let Some(error) = &feed.info.error {
         ui.colored_label(ui.visuals().error_fg_color, &error.message);
     }
-    let unseen = feed.changes.values().filter(|c| c.status.is_some()).count();
-    if feed.info.last_change.is_some() || unseen > 0 {
-        ui.horizontal_wrapped(|ui| {
-            if let Some(change) = &feed.info.last_change {
-                last_change(ui, change);
-            }
-            if unseen > 0
-                && ui
-                    .small_button("Mark all seen")
-                    .on_hover_text("Clear the new and updated badges")
-                    .clicked()
-            {
-                actions.push(Action::Write(WriteOp::MarkSeen {
-                    feed: feed.info.name.clone(),
-                    key: None,
-                }));
-            }
-        });
+    if let Some(change) = &feed.info.last_change {
+        last_change(ui, change);
     }
     let snoozed = feed
         .items
@@ -311,9 +299,18 @@ pub fn show(
                     .corner_radius(4.0)
                     .begin(ui);
                 let mut grip = None;
+                let fill = item
+                    .color
+                    .as_deref()
+                    .and_then(|c| board::color_fill(c, ui.visuals()));
                 {
                     let ui = &mut frame.content_ui;
                     ui.set_width(ui.available_width());
+                    if fill.is_some() {
+                        // Full-contrast text on the colored row.
+                        ui.visuals_mut().override_text_color =
+                            Some(ui.visuals().strong_text_color());
+                    }
                     ui.push_id(&item.key, |ui| {
                         ui.horizontal_top(|ui| {
                             let handle = board::handle(ui, "Drag to reorder or promote");
@@ -347,8 +344,7 @@ pub fn show(
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
                                     ui.set_width(width);
-                                    let status = feed.changes.get(&item.key).and_then(|c| c.status);
-                                    if let Some(status) = status {
+                                    if let Some(status) = status(feed, &item.key) {
                                         ui.horizontal_wrapped(|ui| {
                                             badge(ui, status);
                                             ui.label(egui::RichText::new(&item.title).strong());
@@ -375,9 +371,13 @@ pub fn show(
                         });
                     });
                 }
-                if lit {
-                    frame.frame.fill = ui.visuals().widgets.hovered.weak_bg_fill;
-                }
+                let hover = ui.visuals().widgets.hovered.weak_bg_fill;
+                frame.frame.fill = match (fill, lit) {
+                    (Some(fill), true) => fill.lerp_to_gamma(hover, 0.4),
+                    (Some(fill), false) => fill,
+                    (None, true) => hover,
+                    (None, false) => egui::Color32::TRANSPARENT,
+                };
                 let rect = frame.end(ui).rect;
                 // Resting here: the topmost card, nothing dragged or open.
                 if scroll
@@ -396,23 +396,11 @@ pub fn show(
                 shown.push(&item.key);
                 rects.push(rect);
             }
-            let mut seen = Vec::new();
             let next = resting.map(|(row, rect, item)| {
                 let since = dwell.filter(|d| d.row == row).map_or(now, |d| d.since);
                 let waited = now - since;
                 if waited >= DWELL {
                     show_details(ui, row, rect, feed, item);
-                    // Seen once its details show; sent once per change.
-                    if let Some(change) = feed.changes.get(&item.key).filter(|c| c.status.is_some())
-                    {
-                        let sent_id = salt.with(("seen", &item.key));
-                        let sent = ui.data(|d| d.get_temp::<i64>(sent_id));
-                        let version = change.changed_at_ms.max(change.added_at_ms);
-                        if sent != Some(version) {
-                            ui.data_mut(|d| d.insert_temp(sent_id, version));
-                            seen.push(item.key.clone());
-                        }
-                    }
                 } else {
                     ui.ctx().request_repaint_after_secs((DWELL - waited) as f32);
                     // A line fills along the row's foot while the pointer rests.
@@ -428,12 +416,6 @@ pub fn show(
                 }
                 Dwell { row, since }
             });
-            for key in seen {
-                actions.push(Action::Write(WriteOp::MarkSeen {
-                    feed: feed.info.name.clone(),
-                    key: Some(key),
-                }));
-            }
             if next != dwell {
                 ui.data_mut(|d| match next {
                     Some(next) => {
@@ -547,4 +529,22 @@ fn last_change(ui: &mut egui::Ui, change: &LastChange) {
             }
         });
     }
+}
+
+/// An item's mark now, from its times and the feed's `new_for` window
+/// (DESIGN.md §4.3). Evaluated each frame, so a mark ends on time.
+pub(crate) fn status(feed: &Feed, key: &str) -> Option<ChangeStatus> {
+    let window = window_ms(feed.info.new_for.as_deref());
+    feed.changes
+        .get(key)?
+        .status_at(window, now_ms())
+        .map(|(status, _)| status)
+}
+
+/// Keys of the items marked new or updated now.
+pub(crate) fn marked(feed: &Feed) -> impl Iterator<Item = &str> {
+    feed.items
+        .iter()
+        .map(|i| i.key.as_str())
+        .filter(|key| status(feed, key).is_some())
 }

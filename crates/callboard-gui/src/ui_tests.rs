@@ -27,8 +27,8 @@ fn minutes_ago(minutes: i64) -> i64 {
     crate::app::now_ms() - minutes * 60 * 1000
 }
 
-/// Feed "a" has a description and a last change: item 1 added (still new)
-/// and "Gone item" removed, ten minutes ago.
+/// Feed "a" has a description, a one-hour `new_for` window, and a last change:
+/// item 1 (green) added and "Gone item" removed, ten minutes ago.
 fn feed_info(name: &str) -> FeedInfo {
     let a = name == "a";
     FeedInfo {
@@ -37,6 +37,7 @@ fn feed_info(name: &str) -> FeedInfo {
         description: a.then(|| "Open reviews waiting on me".into()),
         source_url: None,
         stale_after: None,
+        new_for: a.then(|| "1h".into()),
         last_submitted_at_ms: 0,
         error: None,
         last_change: a.then(|| LastChange {
@@ -144,7 +145,7 @@ fn answer(request: Request, saved: &Saved) -> Fetched {
                             info: feed_info(name),
                             item_count: items,
                             snoozed_count: snoozed,
-                            unseen_count: usize::from(name == "a"),
+                            new_count: usize::from(name == "a"),
                             next_wake_at_ms: None,
                         })
                         .into(),
@@ -201,7 +202,8 @@ fn answer(request: Request, saved: &Saved) -> Fetched {
                         serde_json::from_value::<Item>(json!({
                             "key": "1", "title": "Item", "url": "https://example.com/1",
                             "body": "Body text", "tags": ["review"],
-                            "meta": {"author": "sam", "checks": 42}
+                            "meta": {"author": "sam", "checks": 42},
+                            "color": "green"
                         }))
                         .unwrap(),
                         serde_json::from_value::<Item>(json!({"key":"2","title":"Later"})).unwrap(),
@@ -1913,7 +1915,7 @@ impl Ui {
     }
 
     fn details_shown(&self) -> bool {
-        self.harness.query_by_label("Key: 1").is_some()
+        self.harness.query_by_label_contains("Key: 1").is_some()
     }
 }
 
@@ -1964,13 +1966,14 @@ fn passing_over_items_or_using_their_menu_shows_no_details() {
 // Feed descriptions and change tracking (DESIGN.md §4.3, §6.2).
 
 #[test]
-fn a_feed_card_shows_its_description_last_change_and_new_items() {
+fn a_feed_card_shows_its_description_last_change_and_marked_items() {
     let mut ui = side_by_side();
     ui.harness.get_by_label("Open reviews waiting on me");
     ui.harness.get_by_label("Changed 10m ago: 1 new · 1 gone");
+    // Item 1 was added ten minutes ago, inside feed "a"'s one-hour window.
     ui.harness.get_by_label("new");
-    // The sidebar counts it too.
     ui.harness.get_by_label("1 new");
+    assert!(ui.harness.query_by_label("Mark all seen").is_none());
     ui.harness
         .get_by_label("Changed 10m ago: 1 new · 1 gone")
         .hover();
@@ -1978,35 +1981,18 @@ fn a_feed_card_shows_its_description_last_change_and_new_items() {
         ui.harness.step();
     }
     ui.harness.get_by_label("Gone item");
-    ui.harness.get_by_label("Mark all seen").click();
-    ui.settle();
-    assert_eq!(
-        ui.ops(),
-        [WriteOp::MarkSeen {
-            feed: "a".into(),
-            key: None,
-        }]
-    );
 }
 
 #[test]
-fn opening_a_new_items_details_marks_it_seen_once() {
+fn details_show_when_an_item_was_added_its_color_and_change_nothing() {
     let mut ui = side_by_side();
     let row = ui.harness.get_by_label("Item").rect().center();
     ui.rest(row, 1.25);
-    assert!(ui.details_shown());
     ui.harness.get_by_label("Added 10m ago");
-    let seen = WriteOp::MarkSeen {
-        feed: "a".into(),
-        key: Some("1".into()),
-    };
-    assert_eq!(ui.ops(), std::slice::from_ref(&seen));
-    // Resting longer, or coming back before the refetch, sends nothing more.
-    ui.rest(row, 1.0);
-    ui.rest(ui.empty_canvas(), 0.25);
-    ui.rest(row, 1.25);
-    assert!(ui.ops().is_empty());
+    ui.harness.get_by_label("Key: 1 · color: green");
+    assert!(ui.ops().is_empty(), "looking marks nothing");
     // Items from before change tracking show no times.
+    ui.rest(ui.empty_canvas(), 0.25);
     ui.harness.get_by_label("Show snoozed (1)").click();
     ui.settle();
     let card = ui.card(&feed("a"));
@@ -2019,5 +2005,34 @@ fn opening_a_new_items_details_marks_it_seen_once() {
     ui.rest(later, 1.25);
     ui.harness.get_by_label("Key: 2");
     assert!(ui.harness.query_by_label_contains("Added").is_none());
-    assert!(ui.ops().is_empty());
+}
+
+#[test]
+fn a_mark_ends_when_the_window_does_without_a_refetch() {
+    let mut ui = side_by_side();
+    ui.harness.get_by_label("new");
+    // Item 1's hour runs out in 300 ms.
+    let ends_soon = crate::app::now_ms() - 3_600_000 + 300;
+    match &mut ui
+        .harness
+        .state_mut()
+        .cache
+        .contents
+        .get_mut(&feed("a"))
+        .unwrap()
+        .contents
+    {
+        Some(Contents::Feed(a)) => {
+            let change = a.changes.get_mut("1").unwrap();
+            change.added_at_ms = ends_soon;
+            change.changed_at_ms = ends_soon;
+        }
+        _ => panic!("feed a is loaded"),
+    }
+    ui.harness.step();
+    ui.harness.get_by_label("new");
+    std::thread::sleep(Duration::from_millis(400));
+    ui.harness.step();
+    assert!(ui.harness.query_by_label("new").is_none());
+    assert!(ui.ends.requests.try_recv().is_err(), "no refetch needed");
 }

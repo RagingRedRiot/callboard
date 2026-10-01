@@ -213,17 +213,28 @@ pub const COLORS: [(&str, &str); 5] = [
 ];
 
 fn note_fill(color: Option<&str>, visuals: &egui::Visuals) -> egui::Color32 {
+    color
+        .and_then(|c| color_fill(c, visuals))
+        .unwrap_or(visuals.faint_bg_color)
+}
+
+/// A named color's fill for notes and feed items (DESIGN.md §3.2): muted in
+/// the dark theme, pastel in the light one, so text reads on both. `None`
+/// for a name this version does not know.
+pub(crate) fn color_fill(color: &str, visuals: &egui::Visuals) -> Option<egui::Color32> {
     let (dark, light) = match color {
-        Some("yellow") => ([74, 66, 28], [255, 244, 179]),
-        Some("green") => ([34, 62, 40], [208, 238, 208]),
-        Some("blue") => ([30, 50, 78], [208, 226, 255]),
-        Some("pink") => ([78, 38, 56], [255, 216, 230]),
-        Some("purple") => ([54, 42, 80], [230, 216, 255]),
-        // No color, or one this version does not know.
-        _ => return visuals.faint_bg_color,
+        "red" => ([88, 34, 34], [255, 210, 206]),
+        "orange" => ([86, 52, 24], [255, 224, 190]),
+        "yellow" => ([74, 66, 28], [255, 244, 179]),
+        "green" => ([34, 62, 40], [208, 238, 208]),
+        "blue" => ([30, 50, 78], [208, 226, 255]),
+        "purple" => ([54, 42, 80], [230, 216, 255]),
+        "pink" => ([78, 38, 56], [255, 216, 230]),
+        "gray" => ([58, 58, 62], [226, 226, 230]),
+        _ => return None,
     };
     let [r, g, b] = if visuals.dark_mode { dark } else { light };
-    egui::Color32::from_rgb(r, g, b)
+    Some(egui::Color32::from_rgb(r, g, b))
 }
 
 /// An item being edited in place, kept in egui's memory per card.

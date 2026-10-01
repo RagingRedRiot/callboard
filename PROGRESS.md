@@ -859,29 +859,30 @@ themes.
   when the pointer leaves, not for half-second passes between rows, and not
   while a menu is open; existing snooze/promote tests use the menu.
 
-## Feed descriptions and change tracking
+## Feed descriptions, change windows, and item colors
 
-- DESIGN.md §3.1 (`description`), §4.3 (changes and seen), §6.2, §8.1.
-  Migration 0008 adds `feeds.description` and `last_change_json`, and per-item
-  `added_at_ms`, `changed_at_ms`, and nullable `seen_at_ms`; existing items
-  count as seen with times 0. A feed's first submission is its baseline
-  (seen, no last change). `submit` records the last change (counts and up to
-  20 removed key/titles) only when something changed; identical resubmits
-  keep it.
-- API: `FeedInfo` gains `description` and `last_change`; `GET /feeds/{name}`
-  gains `changes` (per key: added/changed times and `status`); `GET /feeds`
-  gains `unseen_count`; `POST /feeds/{name}/seen` (`{}` or `{"key"}`) marks
-  seen and emits a feed notice. CLI: `put --description`, `feed seen NAME
-  [KEY]`.
-- GUI: the card shows the description, "Changed 10m ago: 1 new · 1 gone"
-  (gone titles on hover), and Mark all seen; rows carry new/updated badges;
-  the details card adds the badge and added/changed times, and showing it
-  marks the item seen (once per change); the sidebar shows "N new".
-- Tests: store lifecycle (baseline, new/updated/removed, identical resubmit,
-  seen one and all, re-update, errors), the 1000-character limit, upgrade from
-  a version-7 database, the HTTP route and CLI, and GUI tests for the header,
-  badges, Mark all seen, and marking seen from the details card once.
-- Restart the service to pick up migration 0008 and the new route.
+- DESIGN.md §3.1 (`description`, `new_for`), §3.2 (`color`), §4.3, §6.2,
+  §8.1. Migration 0008 adds `feeds.description`, `new_for`, and
+  `last_change_json`, and per-item `added_at_ms` and `changed_at_ms`.
+- Marks follow time alone (the user chose this over marking seen, which was
+  built first and removed before release): an item is new for `new_for` after
+  it was added, else updated for `new_for` after its content last changed;
+  without `new_for` nothing is marked. `ItemChange::status_at` is shared by
+  the service (read-time `status`, `new_count`, and `next_wake_at_ms`
+  including when marks end) and the GUI, which re-evaluates each frame so a
+  badge ends on time without a refetch. A feed's first submission is the
+  baseline: no last change, and its items have no added time (never new, can
+  be updated later), as do items from before tracking.
+- `color` is one of eight names, validated (a typo fails the submission) and
+  counted as content. The GUI tints rows with a shared palette
+  (`board::color_fill`, now also used by notes) and shows the color in the
+  details card.
+- The last change (counts and up to 20 removed key/titles) is recorded only
+  when something changed. CLI: `put --description`, `put --new-for`.
+- Tests: window rules (new, updated, baseline, no window), lifecycle with
+  expiry, validation, upgrade from version 7, HTTP and CLI, and GUI tests for
+  the header, badges, details, and a badge ending on time with no refetch.
+  Rendered every color in both themes.
 
 ## Suggested next
 

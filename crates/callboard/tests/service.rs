@@ -1472,29 +1472,42 @@ async fn invalid_view_cli_input_never_starts_service() {
 }
 
 #[tokio::test]
-async fn feed_descriptions_changes_and_seen_over_http_and_cli() {
+async fn feed_descriptions_windows_colors_and_changes_over_http_and_cli() {
     let f = Fixture::new();
     let mut service = f.command().arg("serve").spawn().unwrap();
     f.wait_ready().await;
     let put = f
         .cli(
-            &["put", "work", "--description", "Open PRs awaiting me"],
+            &[
+                "put",
+                "work",
+                "--description",
+                "Open PRs awaiting me",
+                "--new-for",
+                "1h",
+            ],
             r#"[{"key":"a","title":"A"},{"key":"b","title":"B"}]"#,
         )
         .await;
     assert!(put.status.success(), "{put:?}");
     let (_, feed) = f.api("GET", "/feeds/work", json!(null)).await;
     assert_eq!(feed["info"]["description"], "Open PRs awaiting me");
+    assert_eq!(feed["info"]["new_for"], "1h");
     assert_eq!(feed["info"]["last_change"], Value::Null);
-    assert_eq!(feed["changes"]["a"]["status"], Value::Null);
+    assert_eq!(feed["changes"]["a"]["status"], Value::Null, "baseline");
 
-    f.api(
-        "PUT",
-        "/feeds/work",
-        json!({"items": [{"key":"a","title":"A2"}, {"key":"c","title":"C"}]}),
-    )
-    .await;
+    let (status, _) = f
+        .api(
+            "PUT",
+            "/feeds/work",
+            json!({"new_for": "1h", "items": [
+                {"key":"a","title":"A","color":"green"}, {"key":"c","title":"C"}
+            ]}),
+        )
+        .await;
+    assert_eq!(status, 200);
     let (_, feed) = f.api("GET", "/feeds/work", json!(null)).await;
+    assert_eq!(feed["items"][0]["color"], "green");
     assert_eq!(feed["changes"]["a"]["status"], "updated");
     assert_eq!(feed["changes"]["c"]["status"], "new");
     let change = &feed["info"]["last_change"];
@@ -1507,30 +1520,22 @@ async fn feed_descriptions_changes_and_seen_over_http_and_cli() {
         json!({"key": "b", "title": "B"})
     );
     let (_, list) = f.api("GET", "/feeds", json!(null)).await;
-    assert_eq!(list[0]["unseen_count"], 2);
+    assert_eq!(list[0]["new_count"], 2);
+    assert!(list[0]["next_wake_at_ms"].is_i64(), "when the marks end");
 
-    // One item over HTTP, unknown keys and fields refused, then all by CLI.
-    let (status, seen) = f.api("POST", "/feeds/work/seen", json!({"key": "c"})).await;
-    assert_eq!((status, seen), (200, json!({"seen": 1})));
-    assert_eq!(
-        f.api("POST", "/feeds/work/seen", json!({"key": "zz"}))
-            .await
-            .0,
-        404
-    );
-    assert_eq!(
-        f.api("POST", "/feeds/work/seen", json!({"keys": []}))
-            .await
-            .0,
-        400
-    );
-    assert_eq!(f.api("POST", "/feeds/none/seen", json!({})).await.0, 404);
-    assert_eq!(f.api("GET", "/feeds/work/seen", json!(null)).await.0, 405);
-    let seen = f.cli(&["feed", "seen", "work"], "").await;
-    assert!(seen.status.success(), "{seen:?}");
-    assert_eq!(json_output(&seen), json!({"seen": 2}));
+    // Unknown colors fail the whole submission; nothing changes.
+    let (status, error) = f
+        .api(
+            "PUT",
+            "/feeds/work",
+            json!({"items": [{"key":"a","title":"A","color":"teal"}]}),
+        )
+        .await;
+    assert_eq!(status, 400, "{error}");
     let (_, list) = f.api("GET", "/feeds", json!(null)).await;
-    assert_eq!(list[0]["unseen_count"], 0);
+    assert_eq!(list[0]["new_count"], 2);
+    // Marks follow time alone: there is nothing to mark seen.
+    assert_eq!(f.api("POST", "/feeds/work/seen", json!({})).await.0, 404);
     f.stop().await;
     assert!(service.wait().await.unwrap().success());
 }

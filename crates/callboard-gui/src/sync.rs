@@ -212,13 +212,6 @@ impl Scheduler {
         self.invalidate(Change::Board { id });
     }
 
-    /// Refetch a feed and the feed list, as its change notice would.
-    pub fn feed_changed(&mut self, name: &str) {
-        self.invalidate(Change::Feed {
-            name: name.to_owned(),
-        });
-    }
-
     /// Fetch `target` soon, for example when a card first shows it. Already
     /// in flight: its response is coming, so it is not queued again.
     pub fn want(&mut self, target: Target) {

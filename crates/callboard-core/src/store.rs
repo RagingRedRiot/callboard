@@ -96,7 +96,7 @@ pub enum ChangeStatus {
 }
 
 /// When an item was added and last changed, and whether it is new or updated
-/// since last seen. Times are 0 for items that predate change tracking.
+/// at read time (§4.3). Times are 0 for items that predate change tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemChange {
     pub added_at_ms: i64,
@@ -105,18 +105,41 @@ pub struct ItemChange {
 }
 
 impl ItemChange {
-    fn new(added_at_ms: i64, changed_at_ms: i64, seen_at_ms: Option<i64>) -> Self {
-        let status = match seen_at_ms {
-            None => Some(ChangeStatus::New),
-            Some(seen) if changed_at_ms > seen => Some(ChangeStatus::Updated),
-            Some(_) => None,
-        };
-        Self {
+    pub fn new(added_at_ms: i64, changed_at_ms: i64, window_ms: Option<i64>, now_ms: i64) -> Self {
+        let mut change = Self {
             added_at_ms,
             changed_at_ms,
-            status,
+            status: None,
+        };
+        change.status = change
+            .status_at(window_ms, now_ms)
+            .map(|(status, _)| status);
+        change
+    }
+
+    /// The status at `now_ms` for a `new_for` window, with when it ends.
+    pub fn status_at(&self, window_ms: Option<i64>, now_ms: i64) -> Option<(ChangeStatus, i64)> {
+        let window = window_ms.filter(|w| *w > 0)?;
+        // An added time of 0 (a baseline item, or one from before change
+        // tracking) is never new, but can still be updated.
+        let new_until = self.added_at_ms.saturating_add(window);
+        let updated_until = self.changed_at_ms.saturating_add(window);
+        if self.added_at_ms > 0 && now_ms < new_until {
+            Some((ChangeStatus::New, new_until))
+        } else if self.changed_at_ms > self.added_at_ms && now_ms < updated_until {
+            Some((ChangeStatus::Updated, updated_until))
+        } else {
+            None
         }
     }
+}
+
+/// A `new_for` value in milliseconds; unparseable values (never stored, as
+/// submissions are validated) count as no window.
+pub fn window_ms(new_for: Option<&str>) -> Option<i64> {
+    new_for
+        .and_then(|v| humantime::parse_duration(v).ok())
+        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +149,8 @@ pub struct FeedInfo {
     pub description: Option<String>,
     pub source_url: Option<String>,
     pub stale_after: Option<String>,
+    /// How long items show as new or updated (§4.3).
+    pub new_for: Option<String>,
     /// UTC Unix milliseconds, refreshed by every accepted snapshot.
     pub last_submitted_at_ms: i64,
     pub error: Option<FeedError>,
@@ -139,8 +164,8 @@ pub struct FeedSummary {
     pub info: FeedInfo,
     pub item_count: usize,
     pub snoozed_count: usize,
-    /// Items new or updated since last seen (§4.3).
-    pub unseen_count: usize,
+    /// Items new or updated now (§4.3).
+    pub new_count: usize,
     /// Earliest future time-snooze deadline; counts change then without a notice.
     pub next_wake_at_ms: Option<i64>,
 }
@@ -428,6 +453,7 @@ struct FeedRow {
     name: String,
     title: String,
     description: Option<String>,
+    new_for: Option<String>,
     last_change_json: Option<String>,
     source_url: Option<String>,
     stale_after: Option<String>,
@@ -445,6 +471,7 @@ impl From<FeedRow> for FeedInfo {
             description: row.description,
             source_url: row.source_url,
             stale_after: row.stale_after,
+            new_for: row.new_for,
             last_submitted_at_ms: row.last_submitted_at_ms,
             error: row
                 .error_message
@@ -778,13 +805,13 @@ impl Store {
             .map(serde_json::to_string)
             .transpose()?;
         sqlx::query(
-            "INSERT INTO feeds (name, title, description, source_url, stale_after,
+            "INSERT INTO feeds (name, title, description, source_url, stale_after, new_for,
                                 last_submitted_at_ms, last_change_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(name) DO UPDATE SET
                title = excluded.title, description = excluded.description,
                source_url = excluded.source_url,
-               stale_after = excluded.stale_after,
+               stale_after = excluded.stale_after, new_for = excluded.new_for,
                last_submitted_at_ms = excluded.last_submitted_at_ms,
                last_change_json = coalesce(excluded.last_change_json, feeds.last_change_json),
                error_message = NULL, error_at_ms = NULL",
@@ -794,6 +821,7 @@ impl Store {
         .bind(&snapshot.description)
         .bind(&snapshot.source_url)
         .bind(&snapshot.stale_after)
+        .bind(&snapshot.new_for)
         .bind(at)
         // The baseline is no change to report.
         .bind(if baseline { None } else { last_change_json })
@@ -827,8 +855,8 @@ impl Store {
             // future view-state foreign keys. Only removed keys are deleted.
             sqlx::query(
                 "INSERT INTO feed_items (feed, key, position, content_json, content_hash,
-                                         added_at_ms, changed_at_ms, seen_at_ms)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                         added_at_ms, changed_at_ms)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(feed, key) DO UPDATE SET
                    position = excluded.position, content_json = excluded.content_json,
                    content_hash = excluded.content_hash,
@@ -843,9 +871,9 @@ impl Store {
             .bind(position as i64)
             .bind(content)
             .bind(hash)
-            .bind(at)
-            .bind(at)
-            .bind(baseline.then_some(at))
+            // Baseline items have no added time: they are never new.
+            .bind(if baseline { 0 } else { at })
+            .bind(if baseline { 0 } else { at })
             .execute(&mut *tx)
             .await?;
         }
@@ -887,51 +915,6 @@ impl Store {
             name: name.to_owned(),
         });
         Ok(summary)
-    }
-
-    /// Mark one item, or every item, of a feed seen now (§4.3). Returns how
-    /// many items were marked.
-    pub async fn mark_seen(&self, feed: &str, key: Option<&str>) -> Result<u64, StoreError> {
-        validate_feed_name(feed)?;
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM feeds WHERE name = ?")
-            .bind(feed)
-            .fetch_optional(&mut *tx)
-            .await?
-            .is_some();
-        if !exists {
-            return Err(StoreError::FeedNotFound(feed.to_owned()));
-        }
-        let at = now_ms()?;
-        let marked = match key {
-            Some(key) => {
-                let result =
-                    sqlx::query("UPDATE feed_items SET seen_at_ms = ? WHERE feed = ? AND key = ?")
-                        .bind(at)
-                        .bind(feed)
-                        .bind(key)
-                        .execute(&mut *tx)
-                        .await?;
-                if result.rows_affected() == 0 {
-                    return Err(StoreError::FeedItemNotFound {
-                        feed: feed.to_owned(),
-                        key: key.to_owned(),
-                    });
-                }
-                result.rows_affected()
-            }
-            None => sqlx::query("UPDATE feed_items SET seen_at_ms = ? WHERE feed = ?")
-                .bind(at)
-                .bind(feed)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected(),
-        };
-        tx.commit().await?;
-        self.notify(Change::Feed {
-            name: feed.to_owned(),
-        });
-        Ok(marked)
     }
 
     pub async fn patch_feed_item(
@@ -1092,16 +1075,19 @@ impl Store {
                 .iter()
                 .map(|content| serde_json::from_str(content))
                 .collect::<Result<Vec<_>, _>>()?;
-            let changes = sqlx::query_as::<_, (String, i64, i64, Option<i64>)>(
-                "SELECT key, added_at_ms, changed_at_ms, seen_at_ms FROM feed_items WHERE feed = ?",
+            let current_time = now_ms()?;
+            let window = window_ms(row.new_for.as_deref());
+            let changes = sqlx::query_as::<_, (String, i64, i64)>(
+                "SELECT key, added_at_ms, changed_at_ms FROM feed_items WHERE feed = ?",
             )
             .bind(name)
             .fetch_all(&mut *tx)
             .await?
             .into_iter()
-            .map(|(key, added, changed, seen)| (key, ItemChange::new(added, changed, seen)))
+            .map(|(key, added, changed)| {
+                (key, ItemChange::new(added, changed, window, current_time))
+            })
             .collect();
-            let current_time = now_ms()?;
             let mut view_state = std::collections::BTreeMap::new();
             for (key, snoozed_until_ms, wake_on_update) in
                 sqlx::query_as::<_, (String, Option<i64>, i64)>(
@@ -1156,16 +1142,33 @@ impl Store {
         )
         .fetch_all(&mut *tx)
         .await?;
-        let unseen: HashMap<String, i64> = sqlx::query_as(
-            "SELECT feed, count(*) FROM feed_items
-             WHERE seen_at_ms IS NULL OR changed_at_ms > seen_at_ms GROUP BY feed",
+        let times = sqlx::query_as::<_, (String, i64, i64)>(
+            "SELECT i.feed, i.added_at_ms, i.changed_at_ms FROM feed_items i
+             JOIN feeds f ON f.name = i.feed WHERE f.new_for IS NOT NULL",
         )
         .fetch_all(&mut *tx)
-        .await?
-        .into_iter()
-        .collect();
+        .await?;
         tx.commit().await?;
         let current_time = now_ms()?;
+        let windows: HashMap<&str, Option<i64>> = rows
+            .iter()
+            .map(|row| (row.name.as_str(), window_ms(row.new_for.as_deref())))
+            .collect();
+        // Items marked now, and when the first of those marks ends.
+        let mut marked: HashMap<String, (usize, Option<i64>)> = HashMap::new();
+        for (feed, added, changed) in times {
+            let window = windows.get(feed.as_str()).copied().flatten();
+            let change = ItemChange {
+                added_at_ms: added,
+                changed_at_ms: changed,
+                status: None,
+            };
+            if let Some((_, until)) = change.status_at(window, current_time) {
+                let entry = marked.entry(feed).or_default();
+                entry.0 += 1;
+                entry.1 = Some(entry.1.map_or(until, |t| t.min(until)));
+            }
+        }
         let mut snoozed: HashMap<String, (usize, Option<i64>)> = HashMap::new();
         for (feed, until, on_update) in snoozes {
             let state = ItemViewState::effective(until, on_update != 0, current_time);
@@ -1183,12 +1186,16 @@ impl Store {
                 let item_count = item_counts.get(&row.name).copied().unwrap_or(0) as usize;
                 let (snoozed_count, next_wake_at_ms) =
                     snoozed.get(&row.name).copied().unwrap_or_default();
-                let unseen_count = unseen.get(&row.name).copied().unwrap_or(0) as usize;
+                let (new_count, mark_ends) = marked.get(&row.name).copied().unwrap_or_default();
+                let next_wake_at_ms = match (next_wake_at_ms, mark_ends) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
                 FeedSummary {
                     info: row.into(),
                     item_count,
                     snoozed_count,
-                    unseen_count,
+                    new_count,
                     next_wake_at_ms,
                 }
             })
