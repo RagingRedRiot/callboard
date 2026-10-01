@@ -17,7 +17,9 @@ async fn connect(paths: &Paths) -> Result<UnixStream, Error> {
     authenticate(&stream, rustix::process::geteuid().as_raw())?;
     Ok(stream)
 }
-fn absent(e: &Error) -> bool {
+/// Whether `e` means no service is listening (as opposed to a refused or
+/// unsafe endpoint).
+pub fn absent(e: &Error) -> bool {
     let io = e
         .downcast_ref::<io::Error>()
         .or_else(|| match e.downcast_ref::<LifecycleError>() {
@@ -70,6 +72,17 @@ async fn connection(paths: &Paths, auto_start: Option<&Path>) -> Result<UnixStre
         Ok(result) => result,
         Err(_) => Err("service did not start within 5 seconds; run `callboard serve` to see the startup error (check for a service using the same data directory and a different socket)".into()),
     }
+}
+
+/// The PID of the process serving the socket, from kernel peer credentials
+/// rather than anything the service says. Never auto-starts.
+pub async fn serving_pid(paths: &Paths) -> Result<i32, Error> {
+    let stream = connect(paths).await?;
+    stream
+        .peer_cred()?
+        .pid()
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| "the kernel did not report the service's PID".into())
 }
 
 // Abort the connection driver on all exits, including timeout/cancellation.
@@ -129,10 +142,16 @@ pub async fn request(
 /// connection. Callers bound idle time per chunk; the service bounds lifetime.
 pub struct Stream {
     body: hyper::body::Incoming,
+    headers: hyper::HeaderMap,
     _driver: Driver,
 }
 
 impl Stream {
+    /// A response header, if present and valid text.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(name)?.to_str().ok()
+    }
+
     /// The next data chunk, or `None` at the end of the body.
     pub async fn chunk(&mut self) -> Result<Option<Vec<u8>>, Error> {
         while let Some(frame) = self.body.frame().await {
@@ -159,10 +178,12 @@ pub async fn stream(
         send(stream, "GET", resource, vec![], "text/event-stream"),
     )
     .await??;
+    let (parts, body) = response.into_parts();
     Ok((
-        response.status(),
+        parts.status,
         Stream {
-            body: response.into_body(),
+            body,
+            headers: parts.headers,
             _driver: driver,
         },
     ))

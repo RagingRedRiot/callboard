@@ -82,7 +82,7 @@ impl Failure {
             Self::Unreachable(m) | Self::Response(m) => m.clone(),
             Self::UnknownRoute(path) => {
                 format!(
-                    "The service does not serve {path}; check that callboard and callboard-gui match"
+                    "The service does not serve {path}; it is probably an older build. Run `callboard upgrade`"
                 )
             }
         }

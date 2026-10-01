@@ -38,7 +38,7 @@ impl Service {
         let (stop, shutdown) = tokio::sync::oneshot::channel();
         let paths = self.paths.clone();
         let task = tokio::spawn(async move {
-            server::serve(paths, async {
+            server::serve(paths, server::Start::default(), async {
                 let _ = shutdown.await;
             })
             .await

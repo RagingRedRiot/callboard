@@ -117,7 +117,38 @@ running, start the unit with `systemctl --user start callboard.service`.
 The unit records the executable and resolved data/config/socket paths. Keep
 the executable at that location, and rerun setup after moving it. Existing
 custom units are preserved. Custom XDG config locations must also be visible
-to your systemd user manager.
+to your systemd user manager. `callboard setup --status` reports the unit and
+its systemd state; `callboard setup --uninstall` disables and deletes it.
+
+### Upgrade
+
+Install the new build over the old one, then move the running service onto it:
+
+```sh
+cargo install --path crates/callboard --locked
+cargo install --path crates/callboard-gui --locked
+callboard upgrade
+```
+
+The service finishes in-flight requests and re-executes the installed binary in
+place, keeping its PID, socket, systemd supervision, and store; migrations run
+as it starts. Requests made meanwhile wait and are then served. A binary that
+fails `--version` is refused and nothing changes. Reopen any open
+`callboard-gui` window to load the new GUI; the status bar shows "Version
+mismatch" while a window and the service are different builds.
+
+### Uninstall
+
+```sh
+callboard uninstall          # add --purge to remove ~/.config/callboard too
+cargo uninstall callboard callboard-gui
+```
+
+`uninstall` lists what it will remove and asks first: the systemd unit, the
+running service, and the data directory with every feed, board, todo, note,
+layout, and the archive, plus the socket. Config is kept unless you pass
+`--purge`. Close `callboard-gui` first; an open window would start a fresh,
+empty service. Off a terminal, `--yes` is required.
 
 Use a current stable Rust toolchain (tested with Rust 1.98.1):
 

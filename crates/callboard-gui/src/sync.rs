@@ -138,6 +138,8 @@ impl Scheduler {
                 self.ever_connected = true;
                 self.last_error = None;
             }
+            // Shown by the app, not a scheduling input.
+            Signal::Build(_) => (),
             Signal::Disconnected(reason) => {
                 self.stream_seen = true;
                 self.rotated_at = match self.stream {

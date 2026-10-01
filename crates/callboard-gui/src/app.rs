@@ -400,6 +400,8 @@ pub struct App {
     closing: bool,
     close_error: Option<String>,
     allow_close: bool,
+    /// The connected service's build, when it reports one (DESIGN.md §7.4).
+    service_build: Option<String>,
 }
 
 impl App {
@@ -605,11 +607,15 @@ impl App {
             closing: false,
             close_error: None,
             allow_close: false,
+            service_build: None,
         }
     }
 
     fn receive(&mut self, now: Instant) {
         while let Ok(signal) = self.channels.signals.try_recv() {
+            if let Signal::Build(build) = &signal {
+                self.service_build = Some(build.clone());
+            }
             self.scheduler.signal(signal, now);
         }
         while let Ok(done) = self.channels.saved.try_recv() {
@@ -1442,6 +1448,12 @@ impl App {
                     ),
                 };
                 ui.label(text).on_hover_text(hover);
+                if let Some(build) = self.service_build.as_deref()
+                    && build != callboard::BUILD
+                {
+                    ui.colored_label(ui.visuals().warn_fg_color, "Version mismatch")
+                        .on_hover_text(build_mismatch(build));
+                }
             });
         });
     }
@@ -2333,6 +2345,15 @@ pub(crate) fn stale(feed: &FeedInfo) -> bool {
         .is_some_and(|limit| {
             (now_ms().saturating_sub(feed.last_submitted_at_ms).max(0) as u128) >= limit.as_millis()
         })
+}
+
+/// Why the service's build differs from this window's, and what to do.
+pub(crate) fn build_mismatch(service: &str) -> String {
+    format!(
+        "The service is build {service}; this window is build {}. One of them is out of date. \
+         After installing an update, run `callboard upgrade` and reopen this window.",
+        callboard::BUILD
+    )
 }
 
 pub(crate) fn link(ui: &mut egui::Ui, url: Option<&str>) {

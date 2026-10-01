@@ -4,7 +4,7 @@ mod view_cli;
 use callboard::{
     Error, client,
     lifecycle::{Environment, Paths},
-    server, setup,
+    server, setup, uninstall, upgrade,
 };
 use callboard_core::feed::{
     ChangeSummary, MAX_SNAPSHOT_BYTES, parse_submission, validate_feed_name,
@@ -28,12 +28,36 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run the service in the foreground (SIGINT/SIGTERM shuts down cleanly).
-    Serve,
+    Serve {
+        /// Internal: the data lock and listener an upgrading service hands to
+        /// its re-executed self.
+        #[arg(long, hide = true, value_name = "LOCK,LISTENER")]
+        handoff: Option<String>,
+    },
     /// Install and enable a systemd user service for future logins.
     Setup {
         /// Print the unit without installing it or calling systemctl.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["status", "uninstall"])]
         print: bool,
+        /// Report the installed unit and its systemd state.
+        #[arg(long, conflicts_with = "uninstall")]
+        status: bool,
+        /// Disable and delete the generated unit; a running service keeps running.
+        #[arg(long)]
+        uninstall: bool,
+    },
+    /// Move the running service onto the installed binary in place, keeping
+    /// its PID, socket, and store.
+    Upgrade,
+    /// Remove callboard from this account: the systemd unit, the running
+    /// service, and all data. Config and the binaries are kept.
+    Uninstall {
+        /// Also remove the config directory.
+        #[arg(long)]
+        purge: bool,
+        /// Don't ask for confirmation (required when not on a terminal).
+        #[arg(long)]
+        yes: bool,
     },
     /// Submit a complete snapshot from a JSON array or object on stdin.
     Put {
@@ -105,20 +129,46 @@ async fn run(cli: Cli) -> Result<u8, Error> {
     let executable: PathBuf = std::env::current_exe()?;
     let auto = (!cli.no_auto_start).then_some(executable.as_path());
     let (method, resource, body, exits) = match cli.command {
-        Command::Serve => {
+        Command::Serve { handoff } => {
             let mut term =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
             let mut interrupt =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-            server::serve(paths, async move {
+            let start = server::Start {
+                executable: upgrade::running_executable(),
+                handoff,
+            };
+            server::serve(paths, start, async move {
                 tokio::select! { _ = term.recv() => (), _ = interrupt.recv() => () }
             })
             .await?;
             return Ok(0);
         }
-        Command::Setup { print } => {
+        Command::Upgrade => {
+            upgrade::run(&paths).await?;
+            return Ok(0);
+        }
+        Command::Uninstall { purge, yes } => {
+            uninstall::run(&paths, purge, yes).await?;
+            return Ok(0);
+        }
+        Command::Setup {
+            print,
+            status,
+            uninstall,
+        } => {
             if print {
                 print!("{}", setup::render(&paths, &executable)?);
+            } else if status {
+                print!("{}", setup::status(&paths).await?);
+            } else if uninstall {
+                match setup::remove(&paths, false).await? {
+                    Some(unit) => println!(
+                        "Disabled and removed {}. A running service is left running; it now starts on demand.",
+                        unit.display()
+                    ),
+                    None => println!("No unit is installed."),
+                }
             } else {
                 let unit = setup::install(&paths, &executable).await?;
                 println!(

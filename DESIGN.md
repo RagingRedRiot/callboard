@@ -497,13 +497,90 @@ for database access and migrations. Each snapshot is applied in one transaction.
 Configuration lives under `$XDG_CONFIG_HOME/callboard/`. Data and config
 directories are private to the user.
 
+### 7.4 Upgrade and uninstall
+
+Installing a new build replaces the files but not the running service, which
+keeps executing the old image. `callboard upgrade` moves the running service
+onto the binary now installed at the path it was started from, in place:
+
+1. The client connects without auto-starting (a fresh service would already be
+   the installed build) and sends `POST /service/upgrade`.
+2. The service checks the binary first. A path that is missing or not
+   executable, or a binary that fails `--version` within 10 seconds, abandons
+   the upgrade with nothing changed. A path naming the image already running
+   (same inode as `/proc/self/exe`) reports that the service is current.
+3. It stops accepting connections but keeps the listening socket open, replies
+   that it is upgrading, ends its event streams, waits up to 5 seconds for
+   in-flight requests, and closes the store.
+4. It re-executes the binary as `serve --handoff LOCK,LISTENER`, passing the
+   data lock and the listening socket across the exec. The PID, the lock and the
+   socket never go away, so a supervisor sees no restart, no other service can
+   take the lock in between, and clients connecting meanwhile wait in the
+   socket's backlog. The new image adopts the descriptors only after checking
+   they are this deployment's lock file (same inode, lock re-asserted) and
+   socket (bound to this socket path). It then starts up as usual, including
+   migrations.
+5. The client connects again, waits for `/health`, and compares the inode of
+   the answering process's `/proc/PID/exe` (PID from peer credentials) with the
+   installed binary. If the exec failed, the service re-executes its own running
+   image instead, and the client reports the failure.
+
+Only a service started by `callboard serve` can upgrade; an in-process test
+service cannot. One upgrade runs at a time. A stop signal during the drain ends
+the service rather than re-executing it. The upgrade route and its replies keep
+a frozen shape, so any future CLI can ask an older service to upgrade. Their
+statuses are 202 `{"upgrade":"started","executable":PATH}`, 200
+`{"upgrade":"current","executable":PATH}`, and 409
+`{"upgrade":"abandoned","reason":TEXT}`. A service that predates the route
+answers 404; restart it once by hand.
+
+`/health` reports the package `version` and a `build` identity: the Git commit,
+with `-dirty` and a digest of the uncommitted diff when the tree had changes, or
+`unknown` outside Git. The event stream carries the same identity in an
+`x-callboard-build` header. The GUI compares it with its own build. A
+difference means one of them is out of date, typically an open GUI after an
+upgrade, and the status bar says to run `callboard upgrade` and reopen the GUI.
+`callboard upgrade` also lists open GUI processes.
+
+`callboard uninstall` removes everything callboard put on the account:
+
+1. It lists what it will remove: the generated systemd unit, the running service
+   (by PID), the data directory with its size and feed and board counts, the
+   socket, and with `--purge` the config directory. It also lists open GUI
+   processes, which would auto-start a fresh, empty service. It removes nothing
+   without interactive confirmation or `--yes`.
+2. It disables and stops the unit (`systemctl --user disable --now`), deletes the
+   unit file, and reloads systemd, so no supervisor restarts the service. A
+   custom `callboard.service` is not ours to remove, so uninstall refuses until
+   it is gone.
+3. It signals whatever process serves the socket at that moment. The process is
+   held by pidfd, confirmed by a second peer-credential check, so a reused PID is
+   never signalled.
+4. It deletes nothing until it holds the data lock, which proves no service
+   remains and keeps an auto-started one from opening the store mid-delete. It
+   waits up to 30 seconds for the signalled process (shutdown drains for at most
+   5), and at most 10 seconds when the lock holder cannot be identified. Either
+   failure leaves the unit removed and says to stop the service and rerun.
+5. It deletes the socket and the data directory, then the config directory with
+   `--purge`. Recursive deletes apply only to real directories named
+   `callboard`, so an unusual XDG value can make uninstall refuse but cannot widen
+   what it deletes. It never auto-starts the service.
+
+The binaries belong to Cargo; uninstall names them and leaves them in place.
+
+`setup --status` reports the unit file, whether it is generated or custom,
+whether it is enabled and active, and its executable. `setup --uninstall`
+disables and deletes the generated unit and leaves a running service running,
+the counterpart of setup leaving one alone.
+
 ## 8. API
 
 ### 8.1 Resources
 
 | Method and path | Purpose |
 |---|---|
-| `GET /health` | Identify the service and API version |
+| `GET /health` | Identify the service, API version, package version, and build (§7.4) |
+| `POST /service/upgrade` | Re-execute the installed binary in place (§7.4) |
 | `PUT /feeds/{name}` | Submit a snapshot (§3.3); returns the change summary |
 | `POST /feeds/{name}/error` | Report a failed fetch (§3.4) |
 | `GET /feeds`, `GET /feeds/{name}` | List feeds; read one with items and view state |
@@ -672,6 +749,10 @@ API semantics. `--no-auto-start` applies to all these commands.
 16 KiB), covering snooze and manual order fields (§8.1). `feed promote NAME KEY
 BOARD [--kind todo|note]` copies an item into the selected board; the default
 kind is todo. Feed keys are literal strings, encoded exactly once by the CLI.
+
+`upgrade` moves the running service onto the installed binary in place;
+`uninstall [--purge] [--yes]` removes the unit, service, and data; `setup
+--status` and `setup --uninstall` inspect and remove the unit (§7.4).
 
 `layouts` lists saved layouts with their cards. `layout save NAME` reads and
 validates a layout object (§6.4) from stdin, bounded at 64 KiB, and creates or

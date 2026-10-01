@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use std::fs::{self, DirBuilder, Permissions};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
@@ -330,4 +330,70 @@ async fn prepared_database_works_with_sqlx_and_restarts() {
     );
     store.close().await;
     drop(restarted);
+}
+
+#[test]
+fn handoff_adopts_only_this_deployments_lock_and_socket() {
+    use std::os::fd::IntoRawFd;
+    let root = private_tempdir();
+    let paths = Paths::resolve(&environment(root.path())).unwrap();
+    for dir in [paths.data_dir(), paths.config_dir(), paths.socket_dir()] {
+        private_dir(dir);
+    }
+    let open_lock = || {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(paths.lock())
+            .unwrap()
+    };
+    let listener = UnixListener::bind(paths.socket()).unwrap();
+    fs::set_permissions(paths.socket(), Permissions::from_mode(0o600)).unwrap();
+    let elsewhere = UnixListener::bind(root.path().join("other.sock")).unwrap();
+    let stray = fs::File::create(root.path().join("stray")).unwrap();
+    let handoff = |lock: i32, listener: i32| format!("{lock},{listener}");
+
+    // Adopt takes ownership of what it is given, so each attempt gets dups.
+    let dup = |fd: &dyn std::os::fd::AsFd| fd.as_fd().try_clone_to_owned().unwrap().into_raw_fd();
+    let not_the_lock = ServiceGuard::adopt(paths.clone(), &handoff(dup(&stray), dup(&listener)));
+    assert!(matches!(
+        not_the_lock,
+        Err(LifecycleError::UnsafePath { .. })
+    ));
+    let not_the_socket = ServiceGuard::adopt(
+        paths.clone(),
+        &handoff(open_lock().into_raw_fd(), dup(&elsewhere)),
+    );
+    assert!(matches!(
+        not_the_socket,
+        Err(LifecycleError::UnsafePath { .. })
+    ));
+
+    let guard = ServiceGuard::adopt(
+        paths.clone(),
+        &handoff(open_lock().into_raw_fd(), dup(&listener)),
+    )
+    .unwrap();
+    UnixStream::connect(paths.socket()).unwrap();
+    // The adopted lock is held: neither a fresh service nor a second
+    // handoff with a different open of the lock file can take it.
+    assert!(matches!(
+        ServiceGuard::bind(paths.clone()),
+        Err(LifecycleError::AlreadyRunning(_))
+    ));
+    assert!(matches!(
+        ServiceGuard::adopt(
+            paths.clone(),
+            &handoff(open_lock().into_raw_fd(), dup(&listener))
+        ),
+        Err(LifecycleError::AlreadyRunning(_))
+    ));
+    drop(guard);
+    assert!(
+        !paths.socket().exists(),
+        "an adopted guard still owns its socket"
+    );
 }

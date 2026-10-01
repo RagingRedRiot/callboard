@@ -19,6 +19,9 @@ pub enum Notice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Signal {
     Connected,
+    /// The connected service's build identity (DESIGN.md §7.4), sent right
+    /// after `Connected` when the service reports one.
+    Build(String),
     Notice(Notice),
     /// `None` for an orderly end of stream (the service rotates streams).
     Disconnected(Option<String>),
@@ -179,6 +182,11 @@ async fn session(
     if !sink(Signal::Connected) {
         return Ok(End::Stopped);
     }
+    if let Some(build) = stream.header("x-callboard-build")
+        && !sink(Signal::Build(build.to_owned()))
+    {
+        return Ok(End::Stopped);
+    }
     loop {
         let chunk = tokio::time::timeout(policy.idle_timeout, stream.chunk())
             .await
@@ -295,6 +303,10 @@ mod tests {
             assert!(matches!(signal, Signal::Disconnected(Some(_))));
             signal = next(&mut rx).await;
         }
+        assert_eq!(
+            next(&mut rx).await,
+            Signal::Build(callboard::BUILD.to_owned())
+        );
         assert_eq!(next(&mut rx).await, Signal::Notice(Notice::Resync));
         let board = running
             .send("POST", "/boards", json!({"name":"Inbox"}))
@@ -312,6 +324,7 @@ mod tests {
             assert!(matches!(signal, Signal::Disconnected(Some(_))));
             signal = next(&mut rx).await;
         }
+        assert!(matches!(next(&mut rx).await, Signal::Build(_)));
         // The new subscription begins with a resync covering the missed gap.
         assert_eq!(next(&mut rx).await, Signal::Notice(Notice::Resync));
         drop(rx);

@@ -9,7 +9,7 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch};
 
 pub(crate) const MAX_SUBSCRIBERS: usize = 16;
 type Receive = Pin<Box<dyn Future<Output = (Option<Bytes>, broadcast::Receiver<Change>)> + Send>>;
@@ -35,16 +35,25 @@ fn receive(mut receiver: broadcast::Receiver<Change>) -> Receive {
 
 pub(crate) struct EventBody {
     pending: Receive,
+    /// Resolves when the service stops accepting; the stream then ends.
+    closing: Pin<Box<dyn Future<Output = ()> + Send>>,
     initial: bool,
     deadline: Pin<Box<tokio::time::Sleep>>,
     _permit: OwnedSemaphorePermit,
 }
 
 impl EventBody {
-    pub(crate) fn new(store: &Store, slots: Arc<Semaphore>) -> Option<Self> {
+    pub(crate) fn new(
+        store: &Store,
+        slots: Arc<Semaphore>,
+        mut closing: watch::Receiver<bool>,
+    ) -> Option<Self> {
         let permit = slots.try_acquire_owned().ok()?;
         Some(Self {
             pending: receive(store.subscribe()),
+            closing: Box::pin(async move {
+                let _ = closing.wait_for(|closing| *closing).await;
+            }),
             initial: true,
             deadline: Box::pin(tokio::time::sleep(Duration::from_secs(25))),
             _permit: permit,
@@ -60,7 +69,7 @@ impl Body for EventBody {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
-        if self.deadline.as_mut().poll(cx).is_ready() {
+        if self.deadline.as_mut().poll(cx).is_ready() || self.closing.as_mut().poll(cx).is_ready() {
             return Poll::Ready(None);
         }
         if self.initial {
@@ -91,8 +100,9 @@ mod tests {
             .await
             .unwrap();
         let slots = Arc::new(Semaphore::new(1));
-        let mut body = EventBody::new(&store, slots.clone()).unwrap();
-        assert!(EventBody::new(&store, slots.clone()).is_none());
+        let (close, closing) = watch::channel(false);
+        let mut body = EventBody::new(&store, slots.clone(), closing.clone()).unwrap();
+        assert!(EventBody::new(&store, slots.clone(), closing.clone()).is_none());
         let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
         assert!(
             std::str::from_utf8(&first)
@@ -116,7 +126,11 @@ mod tests {
         body.deadline.as_mut().reset(tokio::time::Instant::now());
         assert!(body.frame().await.is_none());
         drop(body);
-        assert!(EventBody::new(&store, slots.clone()).is_some());
+        let mut body = EventBody::new(&store, slots.clone(), closing).unwrap();
+        body.frame().await.unwrap().unwrap();
+        close.send(true).unwrap();
+        assert!(body.frame().await.is_none(), "closing ends the stream");
+        drop(body);
         assert_eq!(slots.available_permits(), 1);
         store.close().await;
     }

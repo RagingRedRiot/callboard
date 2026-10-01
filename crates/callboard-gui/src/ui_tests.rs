@@ -2094,3 +2094,25 @@ fn todos_and_notes_take_any_of_the_eight_colors() {
     ui.settle();
     assert_eq!(ui.ops(), [patch(Kind::Note, 20, json!({"color": "gray"}))]);
 }
+
+#[test]
+fn a_service_of_another_build_shows_a_version_mismatch() {
+    let mut ui = Ui::new();
+    ui.ends
+        .signals
+        .send(crate::events::Signal::Connected)
+        .unwrap();
+    ui.ends
+        .signals
+        .send(crate::events::Signal::Build(callboard::BUILD.into()))
+        .unwrap();
+    ui.settle();
+    assert!(ui.harness.query_by_label("Version mismatch").is_none());
+    ui.ends
+        .signals
+        .send(crate::events::Signal::Build("0123456789ab".into()))
+        .unwrap();
+    ui.settle();
+    ui.harness.get_by_label("Version mismatch");
+    assert!(crate::app::build_mismatch("0123456789ab").contains("callboard upgrade"));
+}

@@ -900,6 +900,35 @@ themes.
 - Tests: store colors and validation for each kind, HTTP and CLI, and GUI
   tests for the Color submenu and editor colors.
 
+## Upgrade and uninstall
+
+- Following cued, `callboard upgrade` moves the running service onto the
+  installed binary in place (DESIGN.md §7.4). `POST /service/upgrade` checks
+  the binary (`--version`, same-inode means current), stops accepting, ends
+  event streams, drains for up to 5 seconds, closes the store, and execs `serve
+  --handoff LOCK,LISTENER`. The lock and listening socket cross the exec
+  (`ServiceGuard::exec`/`adopt`, which checks both belong to this deployment),
+  so systemd sees no restart and clients queue in the backlog. A failed exec
+  falls back to `/proc/self/exe`. The client confirms by comparing the serving
+  PID's `/proc/PID/exe` inode with the installed file.
+- `callboard uninstall [--purge] [--yes]` removes the generated unit (`disable
+  --now`), signals the socket's server by pidfd, holds the data lock, then
+  deletes the socket and data directory (config with `--purge`). It refuses a
+  custom unit and deletes only directories named `callboard`. Both commands
+  list open `callboard-gui` processes.
+- `setup --status` and `setup --uninstall`. Setup now classifies a non-0600
+  unit as custom instead of failing on its permissions.
+- `/health` adds `version` and `build` (Git commit, `-dirty.<digest>` for
+  uncommitted changes; `crates/callboard/build.rs`). `/events` sends it as
+  `x-callboard-build`, and the GUI's status bar shows "Version mismatch" when
+  the service is a different build. Event streams now end as soon as the
+  service stops accepting, for shutdown as well as upgrade.
+- Tests: `tests/upgrade.rs` runs a copied binary: in-place upgrade with
+  continuous traffic (none dropped), same PID, repeated upgrade, broken binary
+  refused, forged `--handoff` rejected, uninstall with and without `--purge`,
+  custom-unit refusal, and setup status. Also a lifecycle test for handoff
+  adoption and a GUI mismatch test.
+
 ## Suggested next
 
 Polish from real use with a real tracking script (a GitHub query feed).
