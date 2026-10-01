@@ -306,23 +306,8 @@ impl ServiceGuard {
     pub fn bind(paths: Paths) -> Result<Self, LifecycleError> {
         paths.prepare()?;
         let uid = rustix::process::geteuid().as_raw();
-        let lock = private_file(&paths.lock(), uid)?;
-        match lock.try_lock() {
-            Ok(()) => (),
-            Err(TryLockError::WouldBlock) => {
-                return Err(LifecycleError::AlreadyRunning(paths.lock()));
-            }
-            Err(TryLockError::Error(e)) => return Err(io_error(&paths.lock(), e)),
-        }
-        private_file(&paths.database(), uid)?;
-        for suffix in ["-wal", "-shm", "-journal"] {
-            let path = paths.data.join(format!("callboard.sqlite3{suffix}"));
-            match fs::symlink_metadata(&path) {
-                Ok(metadata) => validate_file(&path, &metadata, uid)?,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => (),
-                Err(e) => return Err(io_error(&path, e)),
-            }
-        }
+        let lock = try_lock(&paths)?.ok_or_else(|| LifecycleError::AlreadyRunning(paths.lock()))?;
+        check_store_files(&paths, uid)?;
         let socket_path = paths.socket();
         remove_stale_socket(&socket_path, uid)?;
         let listener = UnixListener::bind(&socket_path).map_err(|e| io_error(&socket_path, e))?;
@@ -343,12 +328,147 @@ impl ServiceGuard {
         Ok(guard)
     }
 
+    /// The re-executed side of [`ServiceGuard::exec`]: take ownership of the
+    /// inherited lock and listener (`LOCK,LISTENER` descriptor numbers), but
+    /// only after checking they are this deployment's lock file and socket. A
+    /// wrong descriptor adopted as the lock would let two services share a store.
+    pub fn adopt(paths: Paths, handoff: &str) -> Result<Self, LifecycleError> {
+        use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
+        let invalid = |reason| unsafe_path(&paths.lock(), reason);
+        let fds: Vec<i32> = handoff
+            .split(',')
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .map_err(|_| invalid("--handoff takes two descriptor numbers"))?;
+        let [lock_fd, listener_fd] = fds[..] else {
+            return Err(invalid("--handoff takes two descriptor numbers"));
+        };
+        if lock_fd <= 2 || listener_fd <= 2 || lock_fd == listener_fd {
+            return Err(invalid(
+                "--handoff descriptors must be distinct and not stdio",
+            ));
+        }
+        for fd in [lock_fd, listener_fd] {
+            // SAFETY: only queried and flagged here; an fd that is not open
+            // fails with EBADF. Nothing may inherit these from now on.
+            let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+            rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC)
+                .map_err(|e| io_error(&paths.lock(), e))?;
+        }
+        // SAFETY: both descriptors are open (checked above), distinct, and
+        // were handed to this process to own.
+        let (lock, listener) = unsafe {
+            (
+                File::from_raw_fd(lock_fd),
+                UnixListener::from(OwnedFd::from_raw_fd(listener_fd)),
+            )
+        };
+        paths.prepare()?;
+        let uid = rustix::process::geteuid().as_raw();
+        let held = lock.metadata().map_err(|e| io_error(&paths.lock(), e))?;
+        let named = private_file(&paths.lock(), uid)?
+            .metadata()
+            .map_err(|e| io_error(&paths.lock(), e))?;
+        if (held.dev(), held.ino()) != (named.dev(), named.ino()) {
+            return Err(invalid("inherited lock is not this data directory's lock"));
+        }
+        // Re-locking through the inherited open file description succeeds;
+        // any other holder makes it fail.
+        match lock.try_lock() {
+            Ok(()) => (),
+            Err(TryLockError::WouldBlock) => {
+                return Err(LifecycleError::AlreadyRunning(paths.lock()));
+            }
+            Err(TryLockError::Error(e)) => return Err(io_error(&paths.lock(), e)),
+        }
+        check_store_files(&paths, uid)?;
+        let socket_path = paths.socket();
+        let bound = listener
+            .local_addr()
+            .map_err(|e| io_error(&socket_path, e))?;
+        let listening = rustix::net::sockopt::socket_acceptconn(listener.as_fd())
+            .map_err(|e| io_error(&socket_path, e))?;
+        if bound.as_pathname() != Some(socket_path.as_path()) || !listening {
+            return Err(unsafe_path(
+                &socket_path,
+                "inherited listener is not this deployment's socket",
+            ));
+        }
+        let metadata = fs::symlink_metadata(&socket_path).map_err(|e| io_error(&socket_path, e))?;
+        if !metadata.file_type().is_socket() || metadata.uid() != uid {
+            return Err(unsafe_path(&socket_path, "expected an owned socket"));
+        }
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| io_error(&socket_path, e))?;
+        Ok(Self {
+            listener,
+            paths,
+            socket_identity: (metadata.dev(), metadata.ino()),
+            _lock: lock,
+        })
+    }
+
+    /// Become `executable serve --handoff LOCK,LISTENER`, passing the lock and
+    /// listener across the exec (see [`ServiceGuard::adopt`]). Destructors do not
+    /// run, so the socket stays bound. Returns only if the exec failed, with
+    /// both descriptors restored to close-on-exec.
+    pub fn exec(&self, executable: &Path) -> io::Error {
+        use std::os::fd::{AsFd, AsRawFd};
+        use std::os::unix::process::CommandExt;
+        let fds = [self._lock.as_fd(), self.listener.as_fd()];
+        let set = |flags| {
+            fds.iter()
+                .try_for_each(|fd| rustix::io::fcntl_setfd(fd, flags))
+                .map_err(io::Error::from)
+        };
+        if let Err(e) = set(rustix::io::FdFlags::empty()) {
+            let _ = set(rustix::io::FdFlags::CLOEXEC);
+            return e;
+        }
+        let error = std::process::Command::new(executable)
+            .arg("serve")
+            .arg("--handoff")
+            .arg(format!(
+                "{},{}",
+                self._lock.as_raw_fd(),
+                self.listener.as_raw_fd()
+            ))
+            .exec();
+        let _ = set(rustix::io::FdFlags::CLOEXEC);
+        error
+    }
+
     pub fn listener(&self) -> &UnixListener {
         &self.listener
     }
     pub fn paths(&self) -> &Paths {
         &self.paths
     }
+}
+
+/// Take the data lock without waiting: `None` while a service holds it.
+/// Uninstall holds it to prove no service remains (DESIGN.md §7.4).
+pub fn try_lock(paths: &Paths) -> Result<Option<File>, LifecycleError> {
+    let lock = private_file(&paths.lock(), rustix::process::geteuid().as_raw())?;
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(e)) => Err(io_error(&paths.lock(), e)),
+    }
+}
+
+fn check_store_files(paths: &Paths, uid: u32) -> Result<(), LifecycleError> {
+    private_file(&paths.database(), uid)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let path = paths.data.join(format!("callboard.sqlite3{suffix}"));
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => validate_file(&path, &metadata, uid)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+            Err(e) => return Err(io_error(&path, e)),
+        }
+    }
+    Ok(())
 }
 
 impl Drop for ServiceGuard {

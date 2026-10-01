@@ -2,7 +2,7 @@
 """Local merge checks. For merge review, execute this file from a trusted base."""
 import argparse
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 import sys
 
@@ -11,13 +11,35 @@ def git(repo, *args):
     return subprocess.check_output(['git', '-C', str(repo), *args], stderr=subprocess.PIPE)
 
 
-def protected(path):
-    parts = Path(path).parts
+# The gate guards security and core stability, not ordinary feature work.
+# Service runtime is protected by default (new modules included) except the
+# CLI front end, which only builds requests. Route files and service tests are
+# append-only: adding one needs no review, but changing, deleting, or renaming
+# one does, so existing routes and their contract tests stay fixed. GUI code,
+# store queries, layouts, and docs pass without review. Keep in sync with
+# .github/workflows/controls.yml; scripts/tests/test_hosted_controls.py checks that the two agree.
+CONTROL_PREFIXES = ('.github/', '.cargo/', 'scripts/')
+APPEND_ONLY_PREFIXES = ('crates/callboard/src/routes/', 'crates/callboard/tests/')
+GUARDED_PREFIXES = ('crates/callboard/src/', 'crates/callboard-core/migrations/')
+CLI_FRONT_END = {'crates/callboard/src/main.rs', 'crates/callboard/src/board_cli.rs', 'crates/callboard/src/view_cli.rs'}
+BUILD_NAMES = {'Cargo.toml', 'Cargo.lock', 'build.rs', 'rust-toolchain', 'rust-toolchain.toml'}
+GUARDED_FILES = {
+    '.gitignore',
+    'crates/callboard-core/src/feed.rs',
+    'crates/callboard-core/tests/feed.rs',
+    'crates/callboard-core/tests/audit.rs',
+}
+
+
+def protected(path, status):
+    """`status` is GitHub's: 'added', 'modified', 'removed', 'renamed', ..."""
+    if path.startswith(APPEND_ONLY_PREFIXES):
+        return status != 'added'
     return (
-        path.startswith(('.github/', '.cargo/', 'scripts/', 'crates/callboard/src/'))
-        or 'tests' in parts
-        or Path(path).name in {'Cargo.toml', 'Cargo.lock', 'build.rs', 'rust-toolchain', 'rust-toolchain.toml'}
-        or path in {'.gitignore', 'crates/callboard-core/src/feed.rs'}
+        path.startswith(CONTROL_PREFIXES)
+        or (path.startswith(GUARDED_PREFIXES) and path not in CLI_FRONT_END)
+        or PurePosixPath(path).name in BUILD_NAMES
+        or path in GUARDED_FILES
     )
 
 
@@ -28,10 +50,14 @@ def review(repo, base):
     subprocess.run(['git', '-C', str(repo), 'merge-base', '--is-ancestor', base, head], check=True)
     if git(repo, 'status', '--porcelain=v1', '--untracked-files=all'):
         raise RuntimeError('Merge checks require a clean committed tree, including untracked files.')
-    names = git(repo, 'diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--name-only', '-z', base, head)
-    touched = [p for p in names.decode().split('\0') if p and protected(p)]
+    fields = git(repo, 'diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--name-status', '-z', base, head)
+    fields = fields.decode().split('\0')[:-1]
+    statuses = {'A': 'added', 'D': 'removed', 'M': 'modified', 'T': 'changed'}
+    changes = [(path, statuses.get(code, code)) for code, path in zip(fields[::2], fields[1::2])]
+    touched = [path for path, status in changes if protected(path, status)]
     if touched:
-        print('Control changes (additions, deletions, and both sides of renames count):', flush=True)
+        print('Control changes (deletions and both sides of renames count; '
+              'additions count outside append-only paths):', flush=True)
         for name in touched:
             print('  ' + json.dumps(name), flush=True)
         raise RuntimeError('Protected checks or controls differ from the trusted base. Local merge mode has no approval override; use the maintainer-gated hosted control workflow for intentional updates.')
@@ -58,6 +84,9 @@ def main():
     run(repo, ['bash', '-n', 'scripts/security/run.sh'])
     run(repo, ['bash', '-n', 'scripts/security/users.sh'])
     run(repo, ['cargo', 'fmt', '--all', '--', '--check'])
+    # Route files are included by generated code, which cargo fmt does not follow.
+    routes = sorted(str(p) for p in (repo / 'crates/callboard/src/routes').glob('*.rs'))
+    run(repo, ['rustfmt', '--edition', '2024', '--check', *routes])
     run(repo, ['cargo', 'clippy', '--workspace', '--all-targets', '--locked', '--', '-D', 'warnings'])
     run(repo, ['cargo', 'test', '--workspace', '--locked'])
     run(repo, ['cargo', 'build', '-p', 'callboard', '--locked'])

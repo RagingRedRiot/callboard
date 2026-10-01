@@ -1,0 +1,550 @@
+//! Feed cards: items in display order, with snooze, promote, and drag to
+//! reorder or promote (DESIGN.md §6.2).
+use crate::{
+    app::{Action, WriteOp, age, coarse, drag_ghost, link, now_ms, stale},
+    backend::{PromoteKind, Target},
+    board,
+};
+use callboard_core::{
+    feed::{Item, MetaValue},
+    store::{BoardSummary, ChangeStatus, Feed, ItemChange, ItemViewState, LastChange, window_ms},
+};
+use eframe::egui;
+use std::time::Duration;
+
+/// When a snoozed item wakes (DESIGN.md §4.1: whichever condition comes first).
+pub(crate) fn snooze_text(state: &ItemViewState) -> String {
+    let until = state.snoozed_until_ms.map(|at| {
+        // Whole minutes, rounded up: "wakes in 1h", not "59m 59s".
+        let left_ms = at.saturating_sub(now_ms()).max(0) as u64;
+        let left = Duration::from_secs(left_ms.div_ceil(60_000) * 60);
+        // The two largest units are precise enough: "3days 4h", not "… 12m".
+        format!("wakes in {}", coarse(left))
+    });
+    match (until, state.wake_on_update) {
+        (Some(until), true) => format!("Snoozed · {until} or when it changes"),
+        (Some(until), false) => format!("Snoozed · {until}"),
+        (None, _) => "Snoozed until it changes".into(),
+    }
+}
+
+/// Snooze choices: label and duration.
+const SNOOZE_FOR: [(&str, Duration); 4] = [
+    ("For 1 hour", Duration::from_secs(60 * 60)),
+    ("For 4 hours", Duration::from_secs(4 * 60 * 60)),
+    ("For 1 day", Duration::from_secs(24 * 60 * 60)),
+    ("For 1 week", Duration::from_secs(7 * 24 * 60 * 60)),
+];
+
+/// An item's … menu: snooze (or unsnooze) and promote.
+fn item_menu(
+    ui: &mut egui::Ui,
+    feed: &str,
+    key: &str,
+    snoozed: bool,
+    boards: &[BoardSummary],
+    actions: &mut Vec<Action>,
+) {
+    let snooze = |until_ms: Option<i64>, on_update: bool| {
+        Action::Write(WriteOp::Snooze {
+            feed: feed.to_owned(),
+            key: key.to_owned(),
+            until_ms,
+            on_update,
+        })
+    };
+    ui.menu_button("…", |ui| {
+        if snoozed {
+            if ui.button("Unsnooze").clicked() {
+                actions.push(snooze(None, false));
+                ui.close();
+            }
+        } else {
+            ui.menu_button("Snooze", |ui| {
+                for (label, duration) in SNOOZE_FOR {
+                    if ui.button(label).clicked() {
+                        let until = now_ms().saturating_add(duration.as_millis() as i64);
+                        actions.push(snooze(Some(until), false));
+                        ui.close();
+                    }
+                }
+                if ui
+                    .button("Until it changes")
+                    .on_hover_text("Wake when the feed submits different content for it")
+                    .clicked()
+                {
+                    actions.push(snooze(None, true));
+                    ui.close();
+                }
+            });
+        }
+        ui.menu_button("Promote", |ui| {
+            if boards.is_empty() {
+                ui.weak("No boards yet");
+            }
+            for board in boards {
+                ui.push_id(board.info.id, |ui| {
+                    ui.menu_button(&board.info.name, |ui| {
+                        for (label, kind) in [
+                            ("As todo", PromoteKind::Todo),
+                            ("As note", PromoteKind::Note),
+                        ] {
+                            if ui.button(label).clicked() {
+                                actions.push(Action::Write(WriteOp::Promote {
+                                    feed: feed.to_owned(),
+                                    key: key.to_owned(),
+                                    board_id: board.info.id,
+                                    kind,
+                                }));
+                                ui.close();
+                            }
+                        }
+                    });
+                });
+            }
+        });
+    });
+}
+
+/// A link shortened to fit one line: no scheme, truncated with an ellipsis.
+/// Only HTTP(S) links open, and only when clicked (DESIGN.md §10.4).
+fn short_link(ui: &mut egui::Ui, url: &str) {
+    let web = url.starts_with("https://") || url.starts_with("http://");
+    let shown = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let color = if web {
+        ui.visuals().hyperlink_color
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let label = egui::Label::new(egui::RichText::new(shown).small().color(color)).truncate();
+    if web {
+        let response = ui.add(label.sense(egui::Sense::click()));
+        if response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+        }
+    } else {
+        ui.add(label);
+    }
+}
+
+/// How long the pointer rests on an item before its details show, and when
+/// the row starts showing that the wait is under way.
+pub const DWELL: f64 = 1.0;
+const CUE_AFTER: f64 = 0.2;
+
+/// The row the pointer rests on in a card, and since when.
+#[derive(Clone, Copy, PartialEq)]
+struct Dwell {
+    row: egui::Id,
+    since: f64,
+}
+
+/// Everything about an item, shown after the pointer rests on its row.
+fn details(ui: &mut egui::Ui, feed: &Feed, item: &Item) {
+    ui.set_max_width(440.0);
+    ui.label(egui::RichText::new(&item.title).strong());
+    if let Some(url) = &item.url {
+        link(ui, Some(url));
+    }
+    if let Some(change) = feed.changes.get(&item.key)
+        && change.added_at_ms > 0
+    {
+        ui.horizontal_wrapped(|ui| {
+            if let Some(status) = status(feed, &item.key) {
+                badge(ui, status);
+            }
+            if let Some(text) = change_text(change) {
+                ui.weak(text);
+            }
+        });
+    }
+    if let Some(state) = feed.view_state.get(&item.key).filter(|s| s.snoozed) {
+        ui.weak(snooze_text(state));
+    }
+    if let Some(body) = item.body.as_deref().filter(|b| !b.is_empty()) {
+        ui.add_space(4.0);
+        ui.label(body);
+    }
+    if !item.tags.is_empty() {
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            for tag in &item.tags {
+                egui::Frame::new()
+                    .fill(ui.visuals().faint_bg_color)
+                    .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                    .corner_radius(8.0)
+                    .inner_margin(egui::Margin::symmetric(6, 1))
+                    .show(ui, |ui| ui.small(tag));
+            }
+        });
+    }
+    if !item.meta.is_empty() {
+        ui.add_space(4.0);
+        egui::Grid::new("meta")
+            .num_columns(2)
+            .spacing([12.0, 2.0])
+            .show(ui, |ui| {
+                for (key, value) in &item.meta {
+                    ui.weak(key);
+                    ui.label(meta_text(value));
+                    ui.end_row();
+                }
+            });
+    }
+    ui.add_space(4.0);
+    let key = match &item.color {
+        Some(color) => format!("Key: {} · color: {color}", item.key),
+        None => format!("Key: {}", item.key),
+    };
+    ui.weak(egui::RichText::new(key).small());
+}
+
+fn meta_text(value: &MetaValue) -> String {
+    match value {
+        MetaValue::String(s) => s.clone(),
+        MetaValue::Number(n) => n.to_string(),
+        MetaValue::Bool(b) => b.to_string(),
+    }
+}
+
+/// Only the topmost card under the pointer scrolls with the wheel: with a
+/// multiplier of 0 a covered card neither scrolls nor consumes the wheel.
+fn wheel(scroll: bool) -> egui::Vec2 {
+    egui::Vec2::splat(if scroll { 1.0 } else { 0.0 })
+}
+
+pub fn show(
+    ui: &mut egui::Ui,
+    feed: &Feed,
+    salt: egui::Id,
+    scroll: bool,
+    boards: &[BoardSummary],
+    actions: &mut Vec<Action>,
+) {
+    ui.label(format!(
+        "{} items · submitted {} ago{}",
+        feed.items.len(),
+        coarse(age(feed.info.last_submitted_at_ms)),
+        if stale(&feed.info) { " · stale" } else { "" }
+    ));
+    link(ui, feed.info.source_url.as_deref());
+    if let Some(description) = &feed.info.description {
+        ui.label(egui::RichText::new(description).italics());
+    }
+    if let Some(error) = &feed.info.error {
+        ui.colored_label(ui.visuals().error_fg_color, &error.message);
+    }
+    if let Some(change) = &feed.info.last_change {
+        last_change(ui, change);
+    }
+    let snoozed = feed
+        .items
+        .iter()
+        .filter(|i| feed.view_state.get(&i.key).is_some_and(|s| s.snoozed))
+        .count();
+    let toggle = salt.with("show_snoozed");
+    let mut show_snoozed = ui.data(|d| d.get_temp::<bool>(toggle)).unwrap_or(false);
+    ui.horizontal(|ui| {
+        if ui
+            .checkbox(&mut show_snoozed, format!("Show snoozed ({snoozed})"))
+            .changed()
+        {
+            ui.data_mut(|d| d.insert_temp(toggle, show_snoozed));
+        }
+        if feed.manual_order
+            && let Some(first) = feed.items.first()
+            && ui
+                .small_button("Reset order")
+                .on_hover_text("Return to the order the feed submits")
+                .clicked()
+        {
+            actions.push(Action::Write(WriteOp::ResetOrder {
+                feed: feed.info.name.clone(),
+                key: first.key.clone(),
+            }));
+        }
+    });
+    egui::ScrollArea::vertical()
+        .id_salt(salt.with("feed_items"))
+        .auto_shrink([false, false])
+        .wheel_scroll_multiplier(wheel(scroll))
+        .show(ui, |ui| {
+            if feed.items.is_empty() {
+                ui.label("This feed is empty.");
+            }
+            // Shown items: their keys, rows, and the handle being dragged.
+            let mut shown: Vec<&str> = Vec::new();
+            let mut rects = Vec::new();
+            let mut dragging = None;
+            let now = ui.input(|i| i.time);
+            let dwell_id = salt.with("dwell");
+            let dwell: Option<Dwell> = ui.data(|d| d.get_temp(dwell_id));
+            let mut resting = None;
+            for item in &feed.items {
+                let state = feed.view_state.get(&item.key).filter(|s| s.snoozed);
+                if state.is_some() && !show_snoozed {
+                    continue;
+                }
+                let row_id = salt.with(("row", &item.key));
+                // Highlighted while the pointer rests on it.
+                let lit = dwell.is_some_and(|d| d.row == row_id);
+                let mut frame = egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(6, 4))
+                    .corner_radius(4.0)
+                    .begin(ui);
+                let mut grip = None;
+                let fill = item
+                    .color
+                    .as_deref()
+                    .and_then(|c| board::color_fill(c, ui.visuals()));
+                {
+                    let ui = &mut frame.content_ui;
+                    ui.set_width(ui.available_width());
+                    if fill.is_some() {
+                        // Full-contrast text on the colored row.
+                        ui.visuals_mut().override_text_color =
+                            Some(ui.visuals().strong_text_color());
+                    }
+                    ui.push_id(&item.key, |ui| {
+                        ui.horizontal_top(|ui| {
+                            let handle = board::handle(ui, "Drag to reorder or promote");
+                            board::keep_in_place(
+                                ui,
+                                handle.rect,
+                                &Target::Feed(feed.info.name.clone()),
+                            );
+                            if handle.dragged() {
+                                egui::DragAndDrop::set_payload(
+                                    ui.ctx(),
+                                    board::FeedDrag {
+                                        feed: feed.info.name.clone(),
+                                        key: item.key.clone(),
+                                        title: item.title.clone(),
+                                    },
+                                );
+                                if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                                    drag_ghost(ui.ctx(), pos, &item.title);
+                                }
+                            }
+                            grip = Some(handle);
+                            // Room for the … button and the spacing around it,
+                            // so rows never grow wider than the list.
+                            let menu = ui.spacing().interact_size.y
+                                + 2.0 * ui.spacing().item_spacing.x
+                                + 8.0;
+                            let width = (ui.available_width() - menu).max(40.0);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(width, 0.0),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    ui.set_width(width);
+                                    if let Some(status) = status(feed, &item.key) {
+                                        ui.horizontal_wrapped(|ui| {
+                                            badge(ui, status);
+                                            ui.label(egui::RichText::new(&item.title).strong());
+                                        });
+                                    } else {
+                                        ui.label(egui::RichText::new(&item.title).strong());
+                                    }
+                                    if let Some(url) = &item.url {
+                                        short_link(ui, url);
+                                    }
+                                    if let Some(state) = state {
+                                        ui.weak(egui::RichText::new(snooze_text(state)).small());
+                                    }
+                                },
+                            );
+                            item_menu(
+                                ui,
+                                &feed.info.name,
+                                &item.key,
+                                state.is_some(),
+                                boards,
+                                actions,
+                            );
+                        });
+                    });
+                }
+                let hover = ui.visuals().widgets.hovered.weak_bg_fill;
+                frame.frame.fill = match (fill, lit) {
+                    (Some(fill), true) => fill.lerp_to_gamma(hover, 0.4),
+                    (Some(fill), false) => fill,
+                    (None, true) => hover,
+                    (None, false) => egui::Color32::TRANSPARENT,
+                };
+                let rect = frame.end(ui).rect;
+                // Resting here: the topmost card, nothing dragged or open.
+                if scroll
+                    && ui.rect_contains_pointer(rect)
+                    && !ui.input(|i| i.pointer.any_down())
+                    && !egui::Popup::is_any_open(ui.ctx())
+                {
+                    resting = Some((row_id, rect, item));
+                }
+                ui.add_space(2.0);
+                if let Some(grip) = grip
+                    && (grip.dragged() || grip.drag_stopped())
+                {
+                    dragging = Some((shown.len(), grip));
+                }
+                shown.push(&item.key);
+                rects.push(rect);
+            }
+            let next = resting.map(|(row, rect, item)| {
+                let since = dwell.filter(|d| d.row == row).map_or(now, |d| d.since);
+                let waited = now - since;
+                if waited >= DWELL {
+                    show_details(ui, row, rect, feed, item);
+                } else {
+                    ui.ctx().request_repaint_after_secs((DWELL - waited) as f32);
+                    // A line fills along the row's foot while the pointer rests.
+                    if waited >= CUE_AFTER {
+                        let progress = ((waited - CUE_AFTER) / (DWELL - CUE_AFTER)) as f32;
+                        let x = rect.left()..=rect.left() + rect.width() * progress;
+                        ui.painter().hline(
+                            x,
+                            rect.bottom() - 1.0,
+                            egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                        );
+                    }
+                }
+                Dwell { row, since }
+            });
+            if next != dwell {
+                ui.data_mut(|d| match next {
+                    Some(next) => {
+                        d.insert_temp(dwell_id, next);
+                    }
+                    None => d.remove::<Dwell>(dwell_id),
+                });
+                // Highlight (or unhighlight) the row on the next frame.
+                ui.ctx().request_repaint();
+            }
+            if let Some((from, grip)) = dragging
+                && let Some(to) = board::reorder_drop(ui, &rects, from, &grip)
+            {
+                // Dropped here, it is not a promotion.
+                egui::DragAndDrop::clear_payload(ui.ctx());
+                let all: Vec<&str> = feed.items.iter().map(|i| i.key.as_str()).collect();
+                let position = feed_position(&all, &shown, from, to);
+                actions.push(Action::Write(WriteOp::Reorder {
+                    feed: feed.info.name.clone(),
+                    key: shown[from].to_owned(),
+                    position,
+                }));
+            }
+        });
+}
+
+/// Where an item dropped at index `to` among the other shown items goes in
+/// the feed's whole order (`all`, which includes hidden snoozed items): just
+/// after the shown item above it, or before the first shown item.
+pub(crate) fn feed_position(all: &[&str], shown: &[&str], from: usize, to: usize) -> usize {
+    let moved = shown[from];
+    let rest: Vec<&str> = all.iter().copied().filter(|k| *k != moved).collect();
+    let others: Vec<&str> = shown.iter().copied().filter(|k| *k != moved).collect();
+    let index = |key: &str| rest.iter().position(|k| *k == key).unwrap_or(0);
+    match to.checked_sub(1).and_then(|i| others.get(i)) {
+        Some(above) => index(above) + 1,
+        None => others.first().map_or(0, |first| index(first)),
+    }
+}
+
+/// The details card beside a row, above everything else.
+fn show_details(ui: &egui::Ui, row: egui::Id, rect: egui::Rect, feed: &Feed, item: &Item) {
+    let pointer = ui.ctx().pointer_hover_pos().unwrap_or(rect.right_top());
+    egui::Area::new(row.with("details"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pointer + egui::vec2(16.0, 12.0))
+        .constrain(true)
+        .interactable(false)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| details(ui, feed, item));
+        });
+}
+
+/// A small "new" or "updated" pill.
+fn badge(ui: &mut egui::Ui, status: ChangeStatus) {
+    let (text, fill) = match status {
+        ChangeStatus::New => ("new", ui.visuals().selection.bg_fill),
+        ChangeStatus::Updated => ("updated", ui.visuals().warn_fg_color.gamma_multiply(0.6)),
+    };
+    egui::Frame::new()
+        .fill(fill)
+        .corner_radius(6.0)
+        .inner_margin(egui::Margin::symmetric(5, 0))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(text)
+                    .small()
+                    .color(ui.visuals().strong_text_color()),
+            )
+        });
+}
+
+/// "Added 2h ago · changed 10m ago"; none for items that predate change
+/// tracking (their times are 0).
+pub(crate) fn change_text(change: &ItemChange) -> Option<String> {
+    let ago = |at: i64| format!("{} ago", coarse(age(at)));
+    match (change.added_at_ms, change.changed_at_ms) {
+        (0, _) => None,
+        (added, changed) if changed > added => {
+            Some(format!("Added {} · changed {}", ago(added), ago(changed)))
+        }
+        (added, _) => Some(format!("Added {}", ago(added))),
+    }
+}
+
+/// "Changed 10m ago: 2 new · 1 updated · 1 gone", with the gone titles on hover.
+fn last_change(ui: &mut egui::Ui, change: &LastChange) {
+    let parts: Vec<String> = [
+        (change.added, "new"),
+        (change.updated, "updated"),
+        (change.removed, "gone"),
+    ]
+    .iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, what)| format!("{n} {what}"))
+    .collect();
+    let response = ui.weak(format!(
+        "Changed {} ago: {}",
+        coarse(age(change.at_ms)),
+        parts.join(" · ")
+    ));
+    if !change.removed_items.is_empty() {
+        response.on_hover_ui(|ui| {
+            ui.strong("Gone in that change");
+            for item in &change.removed_items {
+                ui.label(&item.title);
+            }
+            let more = change.removed.saturating_sub(change.removed_items.len());
+            if more > 0 {
+                ui.weak(format!("and {more} more"));
+            }
+        });
+    }
+}
+
+/// An item's mark now, from its times and the feed's `new_for` window
+/// (DESIGN.md §4.3). Evaluated each frame, so a mark ends on time.
+pub(crate) fn status(feed: &Feed, key: &str) -> Option<ChangeStatus> {
+    let window = window_ms(feed.info.new_for.as_deref());
+    feed.changes
+        .get(key)?
+        .status_at(window, now_ms())
+        .map(|(status, _)| status)
+}
+
+/// Keys of the items marked new or updated now.
+pub(crate) fn marked(feed: &Feed) -> impl Iterator<Item = &str> {
+    feed.items
+        .iter()
+        .map(|i| i.key.as_str())
+        .filter(|key| status(feed, key).is_some())
+}

@@ -30,13 +30,34 @@ jobs:
           from pathlib import PurePosixPath
           import subprocess
 
-          def protected(path):
-              parts = PurePosixPath(path).parts
+          # The gate guards security and core stability, not ordinary feature work.
+          # Service runtime is protected by default (new modules included) except the
+          # CLI front end, which only builds requests. Route files and service tests are
+          # append-only: adding one needs no review, but changing, deleting, or renaming
+          # one does, so existing routes and their contract tests stay fixed. GUI code,
+          # store queries, layouts, and docs pass without review. Keep in sync with
+          # scripts/checks.py; scripts/tests/test_hosted_controls.py checks that the two agree.
+          CONTROL_PREFIXES = ('.github/', '.cargo/', 'scripts/')
+          APPEND_ONLY_PREFIXES = ('crates/callboard/src/routes/', 'crates/callboard/tests/')
+          GUARDED_PREFIXES = ('crates/callboard/src/', 'crates/callboard-core/migrations/')
+          CLI_FRONT_END = {'crates/callboard/src/main.rs', 'crates/callboard/src/board_cli.rs', 'crates/callboard/src/view_cli.rs'}
+          BUILD_NAMES = {'Cargo.toml', 'Cargo.lock', 'build.rs', 'rust-toolchain', 'rust-toolchain.toml'}
+          GUARDED_FILES = {
+              '.gitignore',
+              'crates/callboard-core/src/feed.rs',
+              'crates/callboard-core/tests/feed.rs',
+              'crates/callboard-core/tests/audit.rs',
+          }
+
+          def protected(path, status):
+              """`status` is GitHub's: 'added', 'modified', 'removed', 'renamed', ..."""
+              if path.startswith(APPEND_ONLY_PREFIXES):
+                  return status != 'added'
               return (
-                  path.startswith(('.github/', '.cargo/', 'scripts/', 'crates/callboard/src/'))
-                  or 'tests' in parts
-                  or PurePosixPath(path).name in {'Cargo.toml', 'Cargo.lock', 'build.rs', 'rust-toolchain', 'rust-toolchain.toml'}
-                  or path in {'.gitignore', 'crates/callboard-core/src/feed.rs'}
+                  path.startswith(CONTROL_PREFIXES)
+                  or (path.startswith(GUARDED_PREFIXES) and path not in CLI_FRONT_END)
+                  or PurePosixPath(path).name in BUILD_NAMES
+                  or path in GUARDED_FILES
               )
 
           def evaluate(event, current, files, permission, attempt):
@@ -45,7 +66,10 @@ jobs:
                       raise RuntimeError('PR revision changed; this event cannot approve it.')
               if len(files) != current['changed_files'] or len(files) >= 3000:
                   raise RuntimeError('Incomplete or oversized file list; refusing to pass.')
-              touched = sorted({p for f in files for p in (f['filename'], f.get('previous_filename', '')) if p and protected(p)})
+              # A rename's old path counts as removed, its new path as renamed.
+              paths = [(f['filename'], f['status']) for f in files]
+              paths += [(f['previous_filename'], 'removed') for f in files if f.get('previous_filename')]
+              touched = sorted({p for p, status in paths if protected(p, status)})
               if not touched:
                   return []
               label = 'reviewed-controls'

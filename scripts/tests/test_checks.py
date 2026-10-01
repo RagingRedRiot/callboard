@@ -50,6 +50,18 @@ class ReviewGate(unittest.TestCase):
         self.commit()
         self.review()
 
+    def test_gui_and_cli_changes_need_no_control_approval(self):
+        self.write('crates/callboard-gui/src/app.rs', 'new gui')
+        self.write('crates/callboard/src/board_cli.rs', 'new cli')
+        self.write('crates/callboard-core/src/store.rs', 'new query')
+        self.commit()
+        self.review()
+
+    def test_new_service_module_is_protected(self):
+        self.write('crates/callboard/src/new_module.rs', 'new runtime code')
+        self.commit()
+        self.assert_blocked()
+
     def test_control_edits_cannot_be_approved_by_a_digest(self):
         self.write('scripts/checks.py', 'changed control')
         self.commit()
@@ -64,11 +76,25 @@ class ReviewGate(unittest.TestCase):
         self.commit()
         self.assert_blocked()
 
-    def test_new_workflow_and_test_are_protected(self):
+    def test_new_workflow_is_protected(self):
         self.write('.github/workflows/new.yml', 'new workflow')
-        self.write('crates/callboard/tests/new.rs', 'new test')
         self.commit()
         self.assert_blocked()
+
+    def test_new_tests_and_routes_need_no_approval(self):
+        self.write('crates/callboard/tests/new.rs', 'new test')
+        self.write('crates/callboard/src/routes/new_feature.rs', 'new route')
+        self.commit()
+        self.review()
+
+    def test_editing_an_existing_test_or_route_requires_review(self):
+        self.write('crates/callboard/src/routes/feeds.rs', 'route')
+        self.commit()
+        self.base = self.git('rev-parse', 'HEAD').strip()
+        for path in ('crates/callboard/tests/auth.rs', 'crates/callboard/src/routes/feeds.rs'):
+            self.write(path, 'edited')
+            self.commit()
+            self.assert_blocked()
 
     def test_dirty_and_untracked_files_fail_even_with_prior_approval(self):
         self.write('scripts/checks.py', 'changed control')

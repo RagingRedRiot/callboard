@@ -1,11 +1,9 @@
 #![cfg(target_os = "linux")]
 
 use std::fs::{self, DirBuilder, Permissions};
-use std::io::{BufRead, BufReader};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
 
 use callboard::lifecycle::{Environment, LifecycleError, Paths, ServiceGuard};
 
@@ -206,10 +204,11 @@ fn non_socket_and_symlink_entries_are_never_removed() {
     let target = root.path().join("target");
     fs::write(&target, "untouched").unwrap();
     symlink(&target, paths.socket()).unwrap();
-    assert!(matches!(
-        ServiceGuard::bind(paths.clone()),
-        Err(LifecycleError::UnsafePath { .. })
-    ));
+    let result = ServiceGuard::bind(paths.clone()).map(|_| ());
+    assert!(
+        matches!(result, Err(LifecycleError::UnsafePath { .. })),
+        "{result:?}"
+    );
     assert!(fs::symlink_metadata(paths.socket()).unwrap().is_symlink());
     assert_eq!(fs::read_to_string(target).unwrap(), "untouched");
 }
@@ -333,79 +332,68 @@ async fn prepared_database_works_with_sqlx_and_restarts() {
     drop(restarted);
 }
 
-// Invoked as a subprocess by the lock/crash test; inert in the normal test run.
 #[test]
-fn child_service() {
-    let Some(root) = std::env::var_os("CALLBOARD_TEST_ROOT") else {
-        return;
-    };
-    let paths = Paths::resolve(&environment(Path::new(&root))).unwrap();
-    if std::env::var_os("CALLBOARD_TEST_CONTEND").is_some() {
-        assert!(matches!(
-            ServiceGuard::bind(paths),
-            Err(LifecycleError::AlreadyRunning(_))
-        ));
-        return;
-    }
-    let _guard = ServiceGuard::bind(paths).unwrap();
-    println!("READY");
-    loop {
-        std::thread::park();
-    }
-}
-
-struct ChildCleanup(Child);
-impl Drop for ChildCleanup {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-#[test]
-fn cross_process_lock_and_crash_recovery() {
+fn handoff_adopts_only_this_deployments_lock_and_socket() {
+    use std::os::fd::IntoRawFd;
     let root = private_tempdir();
     let paths = Paths::resolve(&environment(root.path())).unwrap();
-    let executable = std::env::current_exe().unwrap();
-    let mut child = ChildCleanup(
-        Command::new(&executable)
-            .args(["--exact", "child_service", "--nocapture"])
-            .env("CALLBOARD_TEST_ROOT", root.path())
-            .env_remove("CALLBOARD_TEST_CONTEND")
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
-    let mut reader = BufReader::new(child.0.stdout.take().unwrap());
-    loop {
-        let mut line = String::new();
-        assert_ne!(
-            reader.read_line(&mut line).unwrap(),
-            0,
-            "child exited before startup"
-        );
-        if line.trim() == "READY" {
-            break;
-        }
+    for dir in [paths.data_dir(), paths.config_dir(), paths.socket_dir()] {
+        private_dir(dir);
     }
-    let contender = Command::new(&executable)
-        .args(["--exact", "child_service", "--nocapture"])
-        .env("CALLBOARD_TEST_ROOT", root.path())
-        .env("CALLBOARD_TEST_CONTEND", "1")
-        .output()
-        .unwrap();
-    assert!(
-        contender.status.success(),
-        "{}",
-        String::from_utf8_lossy(&contender.stderr)
+    let open_lock = || {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(paths.lock())
+            .unwrap()
+    };
+    let listener = UnixListener::bind(paths.socket()).unwrap();
+    fs::set_permissions(paths.socket(), Permissions::from_mode(0o600)).unwrap();
+    let elsewhere = UnixListener::bind(root.path().join("other.sock")).unwrap();
+    let stray = fs::File::create(root.path().join("stray")).unwrap();
+    let handoff = |lock: i32, listener: i32| format!("{lock},{listener}");
+
+    // Adopt takes ownership of what it is given, so each attempt gets dups.
+    let dup = |fd: &dyn std::os::fd::AsFd| fd.as_fd().try_clone_to_owned().unwrap().into_raw_fd();
+    let not_the_lock = ServiceGuard::adopt(paths.clone(), &handoff(dup(&stray), dup(&listener)));
+    assert!(matches!(
+        not_the_lock,
+        Err(LifecycleError::UnsafePath { .. })
+    ));
+    let not_the_socket = ServiceGuard::adopt(
+        paths.clone(),
+        &handoff(open_lock().into_raw_fd(), dup(&elsewhere)),
     );
-    child.0.kill().unwrap();
-    child.0.wait().unwrap();
+    assert!(matches!(
+        not_the_socket,
+        Err(LifecycleError::UnsafePath { .. })
+    ));
+
+    let guard = ServiceGuard::adopt(
+        paths.clone(),
+        &handoff(open_lock().into_raw_fd(), dup(&listener)),
+    )
+    .unwrap();
+    UnixStream::connect(paths.socket()).unwrap();
+    // The adopted lock is held: neither a fresh service nor a second
+    // handoff with a different open of the lock file can take it.
+    assert!(matches!(
+        ServiceGuard::bind(paths.clone()),
+        Err(LifecycleError::AlreadyRunning(_))
+    ));
+    assert!(matches!(
+        ServiceGuard::adopt(
+            paths.clone(),
+            &handoff(open_lock().into_raw_fd(), dup(&listener))
+        ),
+        Err(LifecycleError::AlreadyRunning(_))
+    ));
+    drop(guard);
     assert!(
-        paths.socket().exists(),
-        "crash leaves the socket entry behind"
+        !paths.socket().exists(),
+        "an adopted guard still owns its socket"
     );
-    let recovered = ServiceGuard::bind(paths.clone()).unwrap();
-    assert!(UnixStream::connect(paths.socket()).is_ok());
-    drop(recovered);
 }
