@@ -813,6 +813,19 @@ complete, so this is GUI-only (new `board.rs`).
 - Desktop check not done: `cosmic-screenshot` timed out (the portal
   likely wanted approval while the user was away).
 
+## GUI polish
+
+- Ticks show at once: `App::ticks` overrides a todo's done state from the
+  click until a reload agrees (or, after the service confirmed, two reloads
+  disagree, meaning another window changed it back); a refusal reverts it.
+  The board header's open count follows.
+- Feed item handles do not raise their card: each frame records visible feed
+  handles with their card (`board::keep_in_place`), and a press there skips
+  the raise. Other presses on the card still raise it.
+- Tests: tick shown before the reply, reverted on failure, yielding to the
+  service after two disagreeing reloads; promoting from a feed covered by a
+  board leaves the board in front.
+
 ## Suggested next
 
 Polish from real use of board editing, drag-to-promote, quick open, and feed

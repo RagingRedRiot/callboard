@@ -369,6 +369,7 @@ pub struct App {
     pub prompt: Option<NamePrompt>,
     pub delete_prompt: Option<DeletePrompt>,
     pub quick: Option<QuickOpen>,
+    pub ticks: board::Ticks,
     /// The layout last sent as the startup preference (or read from it).
     remembered: Option<LayoutKey>,
     /// The last failed snooze or promotion, until dismissed.
@@ -579,6 +580,7 @@ impl App {
             prompt: None,
             delete_prompt: None,
             quick: None,
+            ticks: board::Ticks::new(),
             remembered: None,
             write_error: None,
             canvas_area: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0)),
@@ -669,6 +671,9 @@ impl App {
             // Responses for cards closed meanwhile would never be invalidated.
             if !open.contains(&target) {
                 continue;
+            }
+            if let (Target::Board(id), Ok(Contents::Board { items, .. })) = (&target, &result) {
+                self.reconcile_ticks(*id, items);
             }
             let entry = self.cache.contents.entry(target).or_default();
             match result {
@@ -767,7 +772,40 @@ impl App {
         }
     }
 
+    /// Drop confirmed ticks that a reload of `board` shows, or that two
+    /// reloads after confirmation did not (another window changed it back).
+    fn reconcile_ticks(&mut self, board: i64, items: &callboard_core::store::BoardContents) {
+        self.ticks.retain(|id, tick| {
+            if tick.board != board || !tick.confirmed {
+                return true;
+            }
+            let stored = items.todos.iter().find(|t| t.item.id == *id);
+            if stored.is_none_or(|t| t.item.done == tick.done) {
+                return false;
+            }
+            tick.stale_reloads += 1;
+            tick.stale_reloads < 2
+        });
+    }
+
     fn board_done(&mut self, op: BoardOp, result: Result<Reply, String>) {
+        if let BoardOp::Patch {
+            kind: Kind::Todo,
+            id,
+            ..
+        } = &op
+        {
+            match &result {
+                Ok(_) => {
+                    if let Some(tick) = self.ticks.get_mut(id) {
+                        tick.confirmed = true;
+                    }
+                }
+                Err(_) => {
+                    self.ticks.remove(id);
+                }
+            }
+        }
         let error = match result {
             Ok(reply) => {
                 for id in op.boards() {
@@ -1022,6 +1060,24 @@ impl App {
             Action::Revert => self.layouts.revert(),
             Action::Refresh => self.scheduler.refresh_all(),
             Action::Write(op) => {
+                if let WriteOp::Board(BoardOp::Patch {
+                    kind: Kind::Todo,
+                    id,
+                    board,
+                    patch,
+                }) = &op
+                    && let Some(done) = patch.get("done").and_then(serde_json::Value::as_bool)
+                {
+                    self.ticks.insert(
+                        *id,
+                        board::Tick {
+                            done,
+                            board: *board,
+                            confirmed: false,
+                            stale_reloads: 0,
+                        },
+                    );
+                }
                 if self.channels.ops.try_send(op).is_err() {
                     self.write_error =
                         Some("The service writer is busy or stopped; try again".into());
@@ -1758,9 +1814,13 @@ impl App {
                 })
                 .collect()
         });
+        let keep = board::take_keep_in_place(ui.ctx());
         for pos in presses {
             if let Some(i) = topmost_at(pos)
                 && i + 1 < canvas.cards.len()
+                && !keep
+                    .iter()
+                    .any(|(rect, card)| rect.contains(pos) && *card == canvas.cards[i].target)
             {
                 actions.push(card_action(&canvas.cards[i].target, CardOp::Raise));
             }
@@ -2066,6 +2126,7 @@ impl App {
                 items,
                 archived.as_ref(),
                 &self.cache.boards,
+                &self.ticks,
                 salt,
                 scroll,
                 actions,
@@ -2407,6 +2468,11 @@ fn show_feed(
                                     "Drag within the feed to reorder, or onto a board card to promote",
                                 );
                             ui.strong(&item.title);
+                            board::keep_in_place(
+                                ui,
+                                handle.rect,
+                                &Target::Feed(feed.info.name.clone()),
+                            );
                             if handle.dragged() {
                                 egui::DragAndDrop::set_payload(
                                     ui.ctx(),

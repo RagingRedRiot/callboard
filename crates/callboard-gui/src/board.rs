@@ -154,6 +154,51 @@ pub struct FeedDrag {
     pub title: String,
 }
 
+/// Feed item handles drawn in the last frame, with their cards. Pressing one
+/// starts a drag toward another card, so it does not raise its own card,
+/// which could then cover the board it is dragged to.
+#[derive(Clone, Default)]
+struct KeepInPlace(Vec<(egui::Rect, Target)>);
+
+fn keep_in_place_id() -> egui::Id {
+    egui::Id::new("callboard_keep_in_place")
+}
+
+/// Record a visible handle that does not raise `card` when pressed.
+pub(crate) fn keep_in_place(ui: &egui::Ui, rect: egui::Rect, card: &Target) {
+    let rect = rect.intersect(ui.clip_rect());
+    ui.ctx().data_mut(|d| {
+        d.get_temp_mut_or_default::<KeepInPlace>(keep_in_place_id())
+            .0
+            .push((rect, card.clone()))
+    });
+}
+
+/// The handles recorded since the last call (the previous frame's).
+pub(crate) fn take_keep_in_place(ctx: &egui::Context) -> Vec<(egui::Rect, Target)> {
+    ctx.data_mut(|d| {
+        std::mem::take(
+            &mut d
+                .get_temp_mut_or_default::<KeepInPlace>(keep_in_place_id())
+                .0,
+        )
+    })
+}
+
+/// A todo ticked or unticked here, shown at once until a reload agrees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tick {
+    pub done: bool,
+    pub board: i64,
+    /// The service stored it.
+    pub confirmed: bool,
+    /// Reloads since then that still showed the old state.
+    pub stale_reloads: u8,
+}
+
+/// Ticks by todo ID.
+pub type Ticks = std::collections::BTreeMap<i64, Tick>;
+
 fn write(op: BoardOp) -> Action {
     Action::Write(WriteOp::Board(op))
 }
@@ -287,9 +332,14 @@ struct Card<'a> {
     board: i64,
     boards: &'a [BoardSummary],
     memory: Memory,
+    ticks: &'a Ticks,
 }
 
 impl Card<'_> {
+    fn done(&self, todo: &Todo) -> bool {
+        self.ticks.get(&todo.id).map_or(todo.done, |t| t.done)
+    }
+
     fn archive(&self) -> bool {
         self.board == ARCHIVE_BOARD
     }
@@ -314,11 +364,13 @@ pub fn show(
     items: &BoardContents,
     archived: Option<&BoardContents>,
     boards: &[BoardSummary],
+    ticks: &Ticks,
     salt: egui::Id,
     topmost: bool,
     actions: &mut Vec<Action>,
 ) {
     let card = Card {
+        ticks,
         board: match target {
             Target::Board(id) => *id,
             _ => ARCHIVE_BOARD,
@@ -326,11 +378,11 @@ pub fn show(
         boards,
         memory: Memory { salt },
     };
-    let open = items.todos.iter().filter(|t| !t.item.done).count();
+    let open = items.todos.iter().filter(|t| !card.done(&t.item)).count();
     let done: Vec<i64> = items
         .todos
         .iter()
-        .filter(|t| t.item.done)
+        .filter(|t| card.done(&t.item))
         .map(|t| t.item.id)
         .collect();
     ui.horizontal(|ui| {
@@ -493,7 +545,7 @@ fn todo_list(ui: &mut egui::Ui, card: &Card, todos: &[BoardItem<Todo>], actions:
                 item_row(
                     ui,
                     |ui, actions| {
-                        let mut done = todo.item.done;
+                        let mut done = card.done(&todo.item);
                         if ui.checkbox(&mut done, &todo.item.title).changed() {
                             actions.push(card.patch(
                                 Kind::Todo,

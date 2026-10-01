@@ -274,6 +274,8 @@ moves there (giving the feed a manual order, §4.2); released on a board card,
 it is promoted (§6.3). Snoozed items keep their places when hidden: a drop
 between two shown items puts it just after the upper one. **Reset order**,
 shown while the feed has a manual order, returns it to the tool's order.
+Pressing the handle does not bring its card to the front, so the card never
+covers the board it is being dragged to.
 
 ### 6.3 Board cards
 
@@ -283,7 +285,8 @@ to the service at once; the card refetches and shows what was stored.
 
 - **Add**: a field above each list. Enter adds a todo with that title, or a
   note with that text, and keeps the field ready for the next one.
-- **Complete**: a todo's checkbox marks it done or not done. Done todos stay
+- **Complete**: a todo's checkbox marks it done or not done, showing the new
+  state at once and reverting if the service refuses. Done todos stay
   until archived; **Archive done** in the board menu archives them together.
 - **Edit**: an item's **…** menu opens an editor in its place for the title,
   body, and link, and for notes a color. Save (or Enter in a single-line

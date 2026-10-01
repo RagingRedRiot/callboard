@@ -1772,3 +1772,59 @@ fn reset_order_shows_only_for_a_manually_ordered_feed() {
         }]
     );
 }
+
+// Polish: ticks show at once; feed handles do not raise their card.
+
+fn ticked(ui: &Ui, title: &str) -> bool {
+    ui.harness.get_by_label(title).accesskit_node().toggled()
+        == Some(egui::accesskit::Toggled::True)
+}
+
+#[test]
+fn a_tick_shows_at_once_reverts_on_failure_and_yields_to_the_service() {
+    let mut ui = inbox();
+    ui.harness.get_by_label("Write notes").click();
+    ui.settle();
+    assert!(
+        ticked(&ui, "Write notes"),
+        "shown before the service answers"
+    );
+    // The open count follows the tick too.
+    ui.harness.get_by_label("2 todos (0 open) · 1 note");
+    let op = patch(Kind::Todo, 10, json!({"done": true}));
+    assert_eq!(ui.ops(), std::slice::from_ref(&op));
+    ui.finish(op.clone(), Err("HTTP 503 Service Unavailable: busy".into()));
+    assert!(!ticked(&ui, "Write notes"), "reverted");
+    ui.harness
+        .get_by_label_contains("Could not change the todo");
+
+    // Stored, but reloads keep showing it open (changed back elsewhere):
+    // the tick holds through one reload, then the service's state wins.
+    ui.harness.get_by_label("Write notes").click();
+    ui.settle();
+    assert_eq!(ui.ops(), std::slice::from_ref(&op));
+    ui.finish(op, Ok(Reply::Done));
+    assert!(ticked(&ui, "Write notes"));
+    ui.harness.get_by_label("Refresh").click();
+    ui.settle();
+    assert!(!ticked(&ui, "Write notes"));
+}
+
+#[test]
+fn pressing_a_feed_handle_leaves_a_covering_board_in_front() {
+    let mut ui = inbox();
+    assert_eq!(ui.order(), [feed("a"), Target::Board(2)]);
+    let grip = ui
+        .harness
+        .get_by_label("Drag to reorder or promote")
+        .rect()
+        .center();
+    assert!(!ui.card(&Target::Board(2)).contains(grip), "handle visible");
+    let todos = ui.harness.get_by_label("Todos").rect().center();
+    ui.drag(grip, todos);
+    assert_eq!(ui.order(), [feed("a"), Target::Board(2)], "not raised");
+    assert_eq!(ui.ops(), [promote(PromoteKind::Todo)]);
+    // A click elsewhere on the feed card still raises it.
+    ui.click_at(ui.title_bar(&feed("a")));
+    assert_eq!(ui.order(), [Target::Board(2), feed("a")]);
+}
