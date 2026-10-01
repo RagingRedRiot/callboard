@@ -265,9 +265,17 @@ sidebar, and a layout is switched to. Escape or a click outside closes it.
 ### 6.2 Feed cards
 
 A feed card shows the feed's title, source link, last-submitted time, and any
-error or stale marker, then its visible items in display order (§4.2). Item
-actions: open link, snooze, drag to reorder, promote to todo or note, reveal
-snoozed.
+error or stale marker, then its visible items in display order (§4.2). Each
+item is a compact row: its title, its link (without the scheme, clicked to
+open), and its snooze state if snoozed. The row's **…** menu snoozes,
+unsnoozes, or promotes it to a board as a todo or note. **Show snoozed**
+reveals snoozed items.
+
+**Details**: resting the pointer on a row highlights it, a line fills along its
+foot, and after one second a card beside the pointer shows everything about
+the item: title, full link, snooze state, body, tags, every `meta` key and
+value, and its key. Passing over rows, dragging, or an open menu shows no card;
+moving off the row hides it.
 
 Each item has a drag handle. Released within its own feed's list, the item
 moves there (giving the feed a manual order, §4.2); released on a board card,

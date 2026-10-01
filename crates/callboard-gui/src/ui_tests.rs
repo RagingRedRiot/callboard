@@ -174,7 +174,12 @@ fn answer(request: Request, saved: &Saved) -> Fetched {
                 Target::Feed(name) => Contents::Feed(Feed {
                     info: feed_info(name),
                     items: vec![
-                        serde_json::from_value::<Item>(json!({"key":"1","title":"Item"})).unwrap(),
+                        serde_json::from_value::<Item>(json!({
+                            "key": "1", "title": "Item", "url": "https://example.com/1",
+                            "body": "Body text", "tags": ["review"],
+                            "meta": {"author": "sam", "checks": 42}
+                        }))
+                        .unwrap(),
                         serde_json::from_value::<Item>(json!({"key":"2","title":"Later"})).unwrap(),
                     ],
                     // Feed "b" has been reordered by hand.
@@ -962,7 +967,8 @@ fn feed_items_snooze_for_a_duration_or_until_they_change() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
-    ui.harness.get_by_label("Snooze").click();
+    ui.feed_menu(0);
+    ui.harness.get_by_label_contains("Snooze").click();
     ui.settle();
     ui.harness.get_by_label("For 1 hour").click();
     ui.settle();
@@ -996,7 +1002,8 @@ fn feed_items_snooze_for_a_duration_or_until_they_change() {
     ui.ends.responses.send(answer(request, &ui.saved)).unwrap();
     ui.settle();
 
-    ui.harness.get_by_label("Snooze").click();
+    ui.feed_menu(0);
+    ui.harness.get_by_label_contains("Snooze").click();
     ui.settle();
     ui.harness.get_by_label("Until it changes").click();
     ui.settle();
@@ -1018,6 +1025,7 @@ fn a_snoozed_item_can_be_unsnoozed_once_shown() {
     assert!(ui.harness.query_by_label("Unsnooze").is_none());
     ui.harness.get_by_label("Show snoozed (1)").click();
     ui.settle();
+    ui.feed_menu(1);
     ui.harness.get_by_label("Unsnooze").click();
     ui.settle();
     assert_eq!(
@@ -1035,7 +1043,8 @@ fn a_snoozed_item_can_be_unsnoozed_once_shown() {
 fn promoting_an_item_names_the_board_and_kind_and_reports_failure() {
     let mut ui = Ui::new();
     ui.ops();
-    ui.harness.get_by_label("Promote").click();
+    ui.feed_menu(0);
+    ui.harness.get_by_label_contains("Promote").click();
     ui.settle();
     // The submenu label carries an arrow; the sidebar has an "Inbox" entry too.
     ui.harness
@@ -1195,13 +1204,31 @@ impl Ui {
     }
 
     /// Open the n-th item menu (…) on the canvas, top to bottom.
+    /// Open the n-th item menu (…) on Inbox's card, top to bottom. Feed
+    /// items have menus too; Inbox is drawn last, so its three come last.
     fn item_menu(&mut self, n: usize) {
-        self.harness
+        let inbox = self.card(&Target::Board(2));
+        let menus: Vec<Pos2> = self
+            .harness
             .query_all_by_label("…")
+            .map(|node| node.rect().center())
+            .filter(|p| inbox.contains(*p))
+            .collect();
+        let board = &menus[menus.len() - 3..];
+        self.click_at(board[n]);
+    }
+
+    /// Open feed "a"'s item menu (…) for its n-th shown item.
+    fn feed_menu(&mut self, n: usize) {
+        let card = self.card(&feed("a"));
+        let at = self
+            .harness
+            .query_all_by_label("…")
+            .map(|node| node.rect().center())
+            .filter(|p| card.contains(*p))
             .nth(n)
-            .expect("an item menu")
-            .click();
-        self.settle();
+            .expect("a feed item menu");
+        self.click_at(at);
     }
 
     /// Focus a labelled field and type into it.
@@ -1827,4 +1854,65 @@ fn pressing_a_feed_handle_leaves_a_covering_board_in_front() {
     // A click elsewhere on the feed card still raises it.
     ui.click_at(ui.title_bar(&feed("a")));
     assert_eq!(ui.order(), [Target::Board(2), feed("a")]);
+}
+
+// Feed item details (DESIGN.md §6.2).
+
+impl Ui {
+    /// Rest the pointer at `at` for `seconds` of harness time.
+    fn rest(&mut self, at: Pos2, seconds: f32) {
+        self.harness.hover_at(at);
+        let steps = (seconds / 0.25).round() as usize;
+        for _ in 0..steps.max(1) {
+            self.harness.step();
+        }
+    }
+
+    fn details_shown(&self) -> bool {
+        self.harness.query_by_label("Key: 1").is_some()
+    }
+}
+
+#[test]
+fn resting_on_a_feed_item_for_a_second_shows_everything_about_it() {
+    let mut ui = side_by_side();
+    // The row shows the title and the link without its scheme.
+    ui.harness.get_by_label("example.com/1");
+    assert!(ui.harness.query_by_label("Body text").is_none());
+    let row = ui.harness.get_by_label("Item").rect().center();
+    ui.rest(row, 0.5);
+    assert!(!ui.details_shown(), "not yet");
+    ui.rest(row, 0.75);
+    assert!(ui.details_shown());
+    for text in ["Body text", "review", "author", "sam", "checks", "42"] {
+        ui.harness.get_by_label(text);
+    }
+    ui.harness.get_by_label("https://example.com/1");
+    // Moving off hides it.
+    ui.rest(ui.empty_canvas(), 0.25);
+    assert!(!ui.details_shown());
+}
+
+#[test]
+fn passing_over_items_or_using_their_menu_shows_no_details() {
+    let mut ui = side_by_side();
+    ui.harness.get_by_label("Show snoozed (1)").click();
+    ui.settle();
+    let first = ui.harness.get_by_label("Item").rect().center();
+    let card = ui.card(&feed("a"));
+    let second = ui
+        .harness
+        .query_all_by_label("Later")
+        .map(|n| n.rect().center())
+        .find(|p| card.contains(*p))
+        .expect("the snoozed item");
+    // Half a second on each, back and forth: the wait restarts per row.
+    for at in [first, second, first, second] {
+        ui.rest(at, 0.5);
+        assert!(!ui.details_shown());
+    }
+    // An open menu suppresses the card.
+    ui.feed_menu(0);
+    ui.rest(first, 2.0);
+    assert!(!ui.details_shown());
 }

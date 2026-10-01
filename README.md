@@ -192,9 +192,11 @@ saved layout. Without any saved
 layout the window starts in an unnamed "Unsaved" arrangement. The
 deleted-board archive can be shown but is not stored in layouts.
 
-Each feed item has **Snooze** (for an hour, four hours, a day, a week, or until
+Feed items are compact rows: title and link. Rest the pointer on one for a
+second to see everything about it (body, tags, `meta` key/values, key). Its
+**…** menu has **Snooze** (for an hour, four hours, a day, a week, or until
 its content changes) and **Promote** (to a board as a todo or note). Snoozed
-items appear under **Show snoozed** with **Unsnooze**. A failed action shows a
+items appear under **Show snoozed**, where the menu offers **Unsnooze**. A failed action shows a
 dismissible message under the layout bar.
 
 Board cards are editable (DESIGN.md §6.3). Type into **Add a todo** or **Add a

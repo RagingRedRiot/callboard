@@ -843,7 +843,23 @@ the desktop screenshot portal was unavailable. Fixed what it showed:
 Dialogs, menus, quick open, editors, and the error bar looked right in both
 themes.
 
+## Feed item rows and details
+
+- Feed card code moved to `feed.rs`. Items are compact rows (handle, title,
+  link without its scheme, snooze state) with a … menu for Snooze/Unsnooze
+  and Promote, replacing the per-item buttons.
+- Details on a deliberate rest: the row highlights, a line fills along its
+  foot from 0.2 s, and at 1 s a non-interactive card beside the pointer shows
+  the title, full link, snooze state, body, tag chips, every `meta` pair (the
+  GUI had never shown meta, though §3.2 promised it), and the key. Only the
+  topmost card, with no button held and no popup open.
+- Found in renders and fixed: rows reserved too little room for the … button
+  and grew a pixel wider each row.
+- Tests: the card appears only after a second and shows each field, hides
+  when the pointer leaves, not for half-second passes between rows, and not
+  while a menu is open; existing snooze/promote tests use the menu.
+
 ## Suggested next
 
-Polish from real use. Feed items still show Snooze and Promote on every
-item; a … menu like board items have would quiet long feeds.
+Feed `description`, and change tracking (new/updated badges cleared by
+opening an item's details or Mark all seen; a last-change line).

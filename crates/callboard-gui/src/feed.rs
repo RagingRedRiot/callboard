@@ -5,7 +5,10 @@ use crate::{
     backend::{PromoteKind, Target},
     board,
 };
-use callboard_core::store::{BoardSummary, Feed, ItemViewState};
+use callboard_core::{
+    feed::{Item, MetaValue},
+    store::{BoardSummary, Feed, ItemViewState},
+};
 use eframe::egui;
 use std::time::Duration;
 
@@ -33,8 +36,8 @@ const SNOOZE_FOR: [(&str, Duration); 4] = [
     ("For 1 week", Duration::from_secs(7 * 24 * 60 * 60)),
 ];
 
-/// Snooze and promote actions for one feed item.
-fn item_actions(
+/// An item's … menu: snooze (or unsnooze) and promote.
+fn item_menu(
     ui: &mut egui::Ui,
     feed: &str,
     key: &str,
@@ -50,10 +53,11 @@ fn item_actions(
             on_update,
         })
     };
-    ui.horizontal(|ui| {
+    ui.menu_button("…", |ui| {
         if snoozed {
-            if ui.small_button("Unsnooze").clicked() {
+            if ui.button("Unsnooze").clicked() {
                 actions.push(snooze(None, false));
+                ui.close();
             }
         } else {
             ui.menu_button("Snooze", |ui| {
@@ -100,6 +104,97 @@ fn item_actions(
             }
         });
     });
+}
+
+/// A link shortened to fit one line: no scheme, truncated with an ellipsis.
+/// Only HTTP(S) links open, and only when clicked (DESIGN.md §10.4).
+fn short_link(ui: &mut egui::Ui, url: &str) {
+    let web = url.starts_with("https://") || url.starts_with("http://");
+    let shown = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let color = if web {
+        ui.visuals().hyperlink_color
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let label = egui::Label::new(egui::RichText::new(shown).small().color(color)).truncate();
+    if web {
+        let response = ui.add(label.sense(egui::Sense::click()));
+        if response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+        }
+    } else {
+        ui.add(label);
+    }
+}
+
+/// How long the pointer rests on an item before its details show, and when
+/// the row starts showing that the wait is under way.
+pub const DWELL: f64 = 1.0;
+const CUE_AFTER: f64 = 0.2;
+
+/// The row the pointer rests on in a card, and since when.
+#[derive(Clone, Copy, PartialEq)]
+struct Dwell {
+    row: egui::Id,
+    since: f64,
+}
+
+/// Everything about an item, shown after the pointer rests on its row.
+fn details(ui: &mut egui::Ui, feed: &Feed, item: &Item) {
+    ui.set_max_width(440.0);
+    ui.label(egui::RichText::new(&item.title).strong());
+    if let Some(url) = &item.url {
+        link(ui, Some(url));
+    }
+    if let Some(state) = feed.view_state.get(&item.key).filter(|s| s.snoozed) {
+        ui.weak(snooze_text(state));
+    }
+    if let Some(body) = item.body.as_deref().filter(|b| !b.is_empty()) {
+        ui.add_space(4.0);
+        ui.label(body);
+    }
+    if !item.tags.is_empty() {
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            for tag in &item.tags {
+                egui::Frame::new()
+                    .fill(ui.visuals().faint_bg_color)
+                    .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                    .corner_radius(8.0)
+                    .inner_margin(egui::Margin::symmetric(6, 1))
+                    .show(ui, |ui| ui.small(tag));
+            }
+        });
+    }
+    if !item.meta.is_empty() {
+        ui.add_space(4.0);
+        egui::Grid::new("meta")
+            .num_columns(2)
+            .spacing([12.0, 2.0])
+            .show(ui, |ui| {
+                for (key, value) in &item.meta {
+                    ui.weak(key);
+                    ui.label(meta_text(value));
+                    ui.end_row();
+                }
+            });
+    }
+    ui.add_space(4.0);
+    ui.weak(egui::RichText::new(format!("Key: {}", item.key)).small());
+}
+
+fn meta_text(value: &MetaValue) -> String {
+    match value {
+        MetaValue::String(s) => s.clone(),
+        MetaValue::Number(n) => n.to_string(),
+        MetaValue::Bool(b) => b.to_string(),
+    }
 }
 
 /// Only the topmost card under the pointer scrolls with the wheel: with a
@@ -165,21 +260,29 @@ pub fn show(
             let mut shown: Vec<&str> = Vec::new();
             let mut rects = Vec::new();
             let mut dragging = None;
+            let now = ui.input(|i| i.time);
+            let dwell_id = salt.with("dwell");
+            let dwell: Option<Dwell> = ui.data(|d| d.get_temp(dwell_id));
+            let mut resting = None;
             for item in &feed.items {
-                let snoozed = feed.view_state.get(&item.key).is_some_and(|s| s.snoozed);
-                if snoozed && !show_snoozed {
+                let state = feed.view_state.get(&item.key).filter(|s| s.snoozed);
+                if state.is_some() && !show_snoozed {
                     continue;
                 }
+                let row_id = salt.with(("row", &item.key));
+                // Highlighted while the pointer rests on it.
+                let lit = dwell.is_some_and(|d| d.row == row_id);
+                let mut frame = egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(6, 4))
+                    .corner_radius(4.0)
+                    .begin(ui);
                 let mut grip = None;
-                let row = ui.group(|ui| {
+                {
+                    let ui = &mut frame.content_ui;
                     ui.set_width(ui.available_width());
                     ui.push_id(&item.key, |ui| {
-                        ui.horizontal(|ui| {
-                            let handle = board::handle(ui, "Drag to reorder or promote")
-                                .on_hover_text(
-                                    "Drag within the feed to reorder, or onto a board card to promote",
-                                );
-                            ui.strong(&item.title);
+                        ui.horizontal_top(|ui| {
+                            let handle = board::handle(ui, "Drag to reorder or promote");
                             board::keep_in_place(
                                 ui,
                                 handle.rect,
@@ -199,29 +302,87 @@ pub fn show(
                                 }
                             }
                             grip = Some(handle);
+                            // Room for the … button and the spacing around it,
+                            // so rows never grow wider than the list.
+                            let menu = ui.spacing().interact_size.y
+                                + 2.0 * ui.spacing().item_spacing.x
+                                + 8.0;
+                            let width = (ui.available_width() - menu).max(40.0);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(width, 0.0),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    ui.set_width(width);
+                                    ui.label(egui::RichText::new(&item.title).strong());
+                                    if let Some(url) = &item.url {
+                                        short_link(ui, url);
+                                    }
+                                    if let Some(state) = state {
+                                        ui.weak(egui::RichText::new(snooze_text(state)).small());
+                                    }
+                                },
+                            );
+                            item_menu(
+                                ui,
+                                &feed.info.name,
+                                &item.key,
+                                state.is_some(),
+                                boards,
+                                actions,
+                            );
                         });
                     });
-                    if let Some(state) = feed.view_state.get(&item.key).filter(|s| s.snoozed) {
-                        ui.weak(snooze_text(state));
-                    }
-                    if let Some(body) = &item.body {
-                        ui.label(body);
-                    }
-                    link(ui, item.url.as_deref());
-                    if !item.tags.is_empty() {
-                        ui.weak(item.tags.join(" · "));
-                    }
-                    ui.push_id(&item.key, |ui| {
-                        item_actions(ui, &feed.info.name, &item.key, snoozed, boards, actions);
-                    });
-                });
+                }
+                if lit {
+                    frame.frame.fill = ui.visuals().widgets.hovered.weak_bg_fill;
+                }
+                let rect = frame.end(ui).rect;
+                // Resting here: the topmost card, nothing dragged or open.
+                if scroll
+                    && ui.rect_contains_pointer(rect)
+                    && !ui.input(|i| i.pointer.any_down())
+                    && !egui::Popup::is_any_open(ui.ctx())
+                {
+                    resting = Some((row_id, rect, item));
+                }
+                ui.add_space(2.0);
                 if let Some(grip) = grip
                     && (grip.dragged() || grip.drag_stopped())
                 {
                     dragging = Some((shown.len(), grip));
                 }
                 shown.push(&item.key);
-                rects.push(row.response.rect);
+                rects.push(rect);
+            }
+            let next = resting.map(|(row, rect, item)| {
+                let since = dwell.filter(|d| d.row == row).map_or(now, |d| d.since);
+                let waited = now - since;
+                if waited >= DWELL {
+                    show_details(ui, row, rect, feed, item);
+                } else {
+                    ui.ctx().request_repaint_after_secs((DWELL - waited) as f32);
+                    // A line fills along the row's foot while the pointer rests.
+                    if waited >= CUE_AFTER {
+                        let progress = ((waited - CUE_AFTER) / (DWELL - CUE_AFTER)) as f32;
+                        let x = rect.left()..=rect.left() + rect.width() * progress;
+                        ui.painter().hline(
+                            x,
+                            rect.bottom() - 1.0,
+                            egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                        );
+                    }
+                }
+                Dwell { row, since }
+            });
+            if next != dwell {
+                ui.data_mut(|d| match next {
+                    Some(next) => {
+                        d.insert_temp(dwell_id, next);
+                    }
+                    None => d.remove::<Dwell>(dwell_id),
+                });
+                // Highlight (or unhighlight) the row on the next frame.
+                ui.ctx().request_repaint();
             }
             if let Some((from, grip)) = dragging
                 && let Some(to) = board::reorder_drop(ui, &rects, from, &grip)
@@ -251,4 +412,17 @@ pub(crate) fn feed_position(all: &[&str], shown: &[&str], from: usize, to: usize
         Some(above) => index(above) + 1,
         None => others.first().map_or(0, |first| index(first)),
     }
+}
+
+/// The details card beside a row, above everything else.
+fn show_details(ui: &egui::Ui, row: egui::Id, rect: egui::Rect, feed: &Feed, item: &Item) {
+    let pointer = ui.ctx().pointer_hover_pos().unwrap_or(rect.right_top());
+    egui::Area::new(row.with("details"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pointer + egui::vec2(16.0, 12.0))
+        .constrain(true)
+        .interactable(false)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| details(ui, feed, item));
+        });
 }
