@@ -3,6 +3,7 @@
 #[cfg(target_os = "linux")]
 pub mod lifecycle;
 
+pub mod api;
 pub mod client;
 pub mod server;
 pub mod setup;

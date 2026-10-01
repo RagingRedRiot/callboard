@@ -20,7 +20,6 @@ GUARDED = [
     'Cargo.toml', 'Cargo.lock', 'crates/callboard-gui/Cargo.toml', 'crates/callboard/build.rs',
     'rust-toolchain.toml', 'crates/callboard/src/lifecycle.rs', 'crates/callboard/src/server.rs',
     'crates/callboard/src/upgrade.rs', 'crates/callboard/src/new_module.rs',
-    'crates/callboard/tests/service.rs', 'crates/callboard/tests/new.rs',
     'crates/callboard-core/src/feed.rs', 'crates/callboard-core/tests/feed.rs',
     'crates/callboard-core/tests/audit.rs', 'crates/callboard-core/migrations/0010_new.sql',
 ]
@@ -34,19 +33,50 @@ UNGUARDED = [
 ]
 
 
+APPEND_ONLY = ['crates/callboard/src/routes/feeds.rs', 'crates/callboard/src/routes/new_feature.rs',
+               'crates/callboard/tests/routes.rs', 'crates/callboard/tests/service.rs',
+               'crates/callboard/tests/new.rs']
+CHANGES = ('modified', 'removed', 'renamed', 'copied', 'changed')
+
+
 class Scope(unittest.TestCase):
+    def both(self, path, status):
+        hosted, local = policy['protected'](path, status), checks.protected(path, status)
+        self.assertEqual(hosted, local, (path, status))
+        return hosted
+
     def test_security_and_stability_paths_are_guarded_in_both_copies(self):
         for path in GUARDED:
-            self.assertTrue(policy['protected'](path), path)
-            self.assertTrue(checks.protected(path), path)
+            for status in ('added', *CHANGES):
+                self.assertTrue(self.both(path, status), (path, status))
 
     def test_gui_cli_store_and_docs_pass_in_both_copies(self):
         for path in UNGUARDED:
-            self.assertFalse(policy['protected'](path), path)
-            self.assertFalse(checks.protected(path), path)
+            for status in ('added', *CHANGES):
+                self.assertFalse(self.both(path, status), (path, status))
+
+    def test_routes_and_service_tests_are_append_only(self):
+        for path in APPEND_ONLY:
+            self.assertFalse(self.both(path, 'added'), path)
+            for status in CHANGES:
+                self.assertTrue(self.both(path, status), (path, status))
+
+    def test_renaming_an_existing_route_away_is_guarded(self):
+        self.pr['changed_files'] = 1
+        event = {'action': 'synchronize', 'pull_request': copy.deepcopy(self.pr)}
+        files = [{'filename': 'crates/callboard/src/routes/elsewhere.rs', 'status': 'renamed',
+                  'previous_filename': 'crates/callboard/src/routes/feeds.rs'}]
+        with self.assertRaises(RuntimeError):
+            policy['evaluate'](event, self.pr, files, None, '1')
+        files = [{'filename': 'crates/callboard/src/routes/new_feature.rs', 'status': 'added'}]
+        self.assertEqual(policy['evaluate'](event, self.pr, files, None, '1'), [])
+
+    def setUp(self):
+        self.pr = {'head': {'sha': 'h'}, 'base': {'sha': 'b'}, 'changed_files': 1, 'labels': []}
 
     def test_both_copies_define_the_same_scope(self):
-        for name in ('CONTROL_PREFIXES', 'GUARDED_PREFIXES', 'CLI_FRONT_END', 'BUILD_NAMES', 'GUARDED_FILES'):
+        for name in ('CONTROL_PREFIXES', 'APPEND_ONLY_PREFIXES', 'GUARDED_PREFIXES', 'CLI_FRONT_END',
+                     'BUILD_NAMES', 'GUARDED_FILES'):
             self.assertEqual(policy[name], getattr(checks, name), name)
 
 
@@ -56,7 +86,7 @@ class HostedControls(unittest.TestCase):
                    'labels': [{'name': 'reviewed-controls'}]}
         self.event = {'action': 'labeled', 'label': {'name': 'reviewed-controls'},
                       'pull_request': copy.deepcopy(self.pr)}
-        self.files = [{'filename': 'scripts/security/users.sh'}]
+        self.files = [{'filename': 'scripts/security/users.sh', 'status': 'modified'}]
 
     def evaluate(self, permission='write', attempt='1'):
         return policy['evaluate'](self.event, self.pr, self.files, permission, attempt)
@@ -92,8 +122,8 @@ class HostedControls(unittest.TestCase):
 
     def test_rename_checks_old_path_and_workflow_additions_are_protected(self):
         self.event['action'] = 'synchronize'
-        for file in ({'filename': 'unprotected.rs', 'previous_filename': 'crates/callboard/tests/auth.rs'},
-                     {'filename': '.github/workflows/replace.yml'}):
+        for file in ({'filename': 'unprotected.rs', 'previous_filename': 'crates/callboard/tests/auth.rs', 'status': 'renamed'},
+                     {'filename': '.github/workflows/replace.yml', 'status': 'added'}):
             self.files = [file]
             with self.assertRaises(RuntimeError):
                 self.evaluate()
@@ -104,7 +134,7 @@ class HostedControls(unittest.TestCase):
             self.evaluate()
 
     def test_plain_code_or_docs_change_can_pass_without_review_label(self):
-        self.files = [{'filename': 'README.md'}]
+        self.files = [{'filename': 'README.md', 'status': 'modified'}]
         self.event['action'] = 'synchronize'
         self.assertEqual(self.evaluate(permission=None), [])
 

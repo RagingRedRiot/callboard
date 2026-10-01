@@ -942,6 +942,15 @@ themes.
   and that their definitions match.
 - The hosted gate runs the base branch's definition, so the narrower scope takes
   effect after this merges; this PR itself still needs `reviewed-controls`.
+- Routes split out of `server.rs` so existing routes are fixed but new ones
+  are free: `api.rs` (guarded) owns dispatch, captures, body limits, and an
+  overlap check that fails startup; `src/routes/{feeds,boards,layouts,
+  preferences}.rs` hold the handlers, registered by `build.rs`. The gate treats
+  `src/routes/` and `crates/callboard/tests/` as append-only (adding a file
+  passes, changing one needs review). `tests/routes.rs` pins every existing
+  route's method, path, status, and response fields. Route modules forbid
+  unsafe code, and `checks.py` runs rustfmt on them, since cargo fmt does not
+  follow generated module paths. Migrations stay fully guarded.
 
 ## Suggested next
 

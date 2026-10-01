@@ -660,6 +660,12 @@ A change summary:
  "added_keys": ["..."], "removed_keys": [], "updated_keys": ["...", "..."]}
 ```
 
+Feature routes live in `crates/callboard/src/routes/`, one file per area,
+registered by `build.rs`. The dispatcher matches captures (`{feed}` is a valid
+feed name, `{id}` an integer, `{key}` and `{name}` decoded once), applies body
+limits, and refuses to start if two routes, or a route and a service endpoint
+(`/health`, `/events`, `/service/upgrade`), could match the same path.
+
 ### 8.2 Events
 
 `GET /events` is a server-sent event stream of change notices naming the feed,
