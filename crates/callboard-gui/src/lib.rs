@@ -8,11 +8,18 @@ pub mod quick;
 pub mod sync;
 #[cfg(test)]
 mod testing;
+pub mod theme;
 #[cfg(test)]
 mod ui_tests;
 pub mod workspace;
 
 use std::path::{Path, PathBuf};
+
+/// The window and taskbar icon.
+pub fn window_icon() -> eframe::egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png"))
+        .expect("bundled icon is a valid PNG")
+}
 
 pub fn find_service_executable(
     gui: &Path,
@@ -43,6 +50,13 @@ fn executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::find_service_executable;
+
+    #[test]
+    fn bundled_window_icon_decodes() {
+        let icon = super::window_icon();
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+    }
     use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
     fn executable(path: &Path) {

@@ -952,6 +952,72 @@ themes.
   unsafe code, and `checks.py` runs rustfmt on them, since cargo fmt does not
   follow generated module paths. Migrations stay fully guarded.
 
+## Presentation
+
+- Applied the layout that recent top-starred GitHub repos share (researched in
+  the cued session): a landing-page first screen, with the detail after it. The
+  README is now a centered text header with a tagline, static badges (license,
+  Rust, Linux; GitHub-data badges stay off while the repo is private), a
+  navigation row, a canvas screenshot in light and dark (`<picture>`), a pitch
+  with bold-led feature bullets, an install-first quick start (verified in an
+  isolated deployment), and a short "How it works".
+- The reference material moved, mostly verbatim, to `docs/cli.md`,
+  `docs/gui.md` (now with section headings), and `docs/development.md`.
+- MIT `LICENSE` (as cued). GitHub topics and description set.
+- Screenshots: rendered headlessly with egui_kittest's wgpu renderer, from the
+  real app against an isolated service seeded with demo data, in a scratch
+  worktree (not committed); transparent margins trimmed. To re-render, seed a
+  service, build the service and GUI from the same tree so the builds match
+  (otherwise the status bar shows "Version mismatch"), and render at
+  1200x830 points, 1.5x scale.
+- Not yet: Cargo `license` metadata (a guarded file; left for the next guarded
+  change so this PR needs no control review), the app icon and social preview
+  (being designed separately), and a window icon in the GUI once the icon exists.
+
+## Visual redesign
+
+- Researched modern UI patterns (brand design analyses in
+  VoltAgent/awesome-design-md, Rerun's egui `re_ui` tokens, a Refactoring UI
+  diagnosis checklist, Plane and Planka cards) and applied them.
+- `theme.rs`: palette (slate neutrals, the icon's teal as the one accent),
+  radii, spacing, type scale, ghost buttons, shadows; Inter and Phosphor
+  bundled (`assets/fonts`, OFL and MIT). Icons use their own font family:
+  Inter has glyphs in Phosphor's private-use range, and Phosphor blanks a-z.
+  Fonts switch at the start of the next frame, so `App::new` installs the
+  theme before the first one; a frame that installs it draws nothing.
+- Top bar: a layout menu (switch, save as, new, rename, delete, show all), a
+  "Search or jump to…" field for quick open, and a live dot. Sidebar: section
+  labels, icon rows with muted counts, a "new" pill, an error mark.
+- Cards: surface with hairline and shadow, accent ring on the front card,
+  board color as a top band, icon buttons (swap, collapse, close) with
+  accessible names. Feed rows: color as an edge bar, quiet links, pills for
+  new/updated, one truncating meta line (it used to widen the card body).
+  Board rows: no outlines, a drawn checkbox, section labels; empty toggles
+  ("Show snoozed (0)") are hidden. Quick open is a command palette. Empty and
+  error states have icons. Hover fades.
+- Fixed: a card placed near another could cover its title bar (cascade only
+  applied within 16 points of a corner); it now cascades off any covered
+  title bar.
+- README screenshots re-rendered. Tests updated for the new accessible names
+  and the layout menu; a placement test added.
+
+## Demo GIF
+
+- Recorded the README demo as cued's VHS tape does for the terminal, but for
+  the GUI: the real app in egui_kittest with the wgpu renderer against an
+  in-process service, scripted pointer, drag, key, and text events, a drawn
+  pointer and terminal strip, and ffmpeg. The story: `callboard put` adds a PR
+  live, its details on hover, a drag onto the Inbox promotes it, a todo is
+  ticked, a nightly build turns green, the canvas pans away and Ctrl+K jumps
+  back.
+- GIF size: the render's transparent margin made ffmpeg store every frame
+  whole (27 MB); cropping it and dropping alpha lets unchanged frames cost
+  nothing (about 1.3 MB per theme at 1184x704, 15 fps).
+- The README hero is now the GIF (light and dark); the static screenshot
+  moved to the top of `docs/gui.md`.
+- The recorder is not in this repository: it is becoming a standalone tool
+  for scripted demos of any project.
+
 ## Suggested next
 
 Polish from real use with a real tracking script (a GitHub query feed).

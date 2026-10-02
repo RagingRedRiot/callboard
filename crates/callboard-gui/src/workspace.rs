@@ -18,9 +18,10 @@ pub const DEFAULT_CARD: Vec2 = Vec2::new(420.0, 520.0);
 /// Smallest card; smaller saved sizes are enlarged when shown.
 pub const MIN_CARD: Vec2 = Vec2::new(220.0, 120.0);
 /// Height of a card's title bar, which is all a collapsed card shows.
-pub const TITLE_HEIGHT: f32 = 28.0;
-/// Offset between cards placed at the same spot.
-pub const CASCADE: f32 = 32.0;
+pub const TITLE_HEIGHT: f32 = 34.0;
+/// Offset between cards placed at nearly the same spot: more than a title
+/// bar, so the card underneath keeps its title and buttons in view.
+pub const CASCADE: f32 = TITLE_HEIGHT + 6.0;
 /// Space kept between a revealed card and the edge of the view.
 pub const MARGIN: f32 = 24.0;
 
@@ -185,8 +186,8 @@ impl Canvas {
     }
 
     /// Reveal the target's card, or place a new one: at `at` (canvas units,
-    /// its top-left) or centred in the view, cascaded off any card already
-    /// there. Never adds a second card for a target.
+    /// its top-left) or centred in the view, cascaded off any card whose
+    /// title bar it would cover. Never adds a second card for a target.
     pub fn place(&mut self, target: Target, at: Option<Pos2>, viewport: Vec2) {
         if self.reveal(&target, viewport) {
             return;
@@ -197,11 +198,10 @@ impl Canvas {
         let mut min = at
             .unwrap_or_else(|| self.view + (viewport - size) / 2.0)
             .round();
-        while self
-            .cards
-            .iter()
-            .any(|c| (c.rect.min - min).length() < CASCADE / 2.0)
-        {
+        while self.cards.iter().any(|c| {
+            let offset = c.rect.min - min;
+            offset.x.abs() < CASCADE && offset.y.abs() < CASCADE
+        }) {
             min += Vec2::splat(CASCADE);
         }
         self.cards.push(CardState {
@@ -764,6 +764,19 @@ mod tests {
         let saved = canvas.to_layout();
         assert_eq!(saved.cards.len(), 1);
         assert!(saved.validate().is_ok());
+    }
+
+    #[test]
+    fn a_card_placed_near_another_never_covers_its_title_bar() {
+        let mut canvas = Canvas::new(egui::Id::new("c"));
+        canvas.place(feed("a"), Some(Pos2::new(100.0, 100.0)), VIEWPORT);
+        // Off by a few points: still on a's title bar, so it cascades.
+        canvas.place(feed("b"), Some(Pos2::new(110.0, 113.0)), VIEWPORT);
+        let (a, b) = (canvas.cards[0].rect, canvas.cards[1].rect);
+        assert!(b.top() - a.top() > TITLE_HEIGHT, "{a:?} {b:?}");
+        // Clear of every title bar, it stays where it was put.
+        canvas.place(feed("c"), Some(Pos2::new(100.0, 400.0)), VIEWPORT);
+        assert_eq!(canvas.cards[2].rect.min, Pos2::new(100.0, 400.0));
     }
 
     #[test]

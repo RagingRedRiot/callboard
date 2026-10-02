@@ -18,7 +18,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 760.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1200.0, 760.0])
+            .with_app_id("callboard")
+            .with_icon(callboard_gui::window_icon()),
         ..Default::default()
     };
     eframe::run_native(

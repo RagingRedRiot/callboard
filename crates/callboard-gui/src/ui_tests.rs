@@ -623,7 +623,7 @@ fn clicking_a_layout_switches_to_it() {
 #[test]
 fn a_card_close_button_removes_it_and_shows_the_empty_canvas_hint() {
     let mut ui = Ui::new();
-    ui.harness.get_by_label("×").click();
+    ui.harness.get_by_label("Close card").click();
     ui.settle();
     assert!(ui.canvas().cards.is_empty());
     ui.harness.get_by_label_contains("No cards in this layout");
@@ -637,7 +637,7 @@ fn show_retargets_a_card_in_place_and_disables_placed_targets() {
     let b = ui.card(&feed("b"));
     // Show… on b's card, the front one: the last drawn.
     ui.harness
-        .query_all_by_value("Show…")
+        .query_all_by_label("Show…")
         .last()
         .unwrap()
         .click();
@@ -693,13 +693,13 @@ fn the_corner_grip_resizes_down_to_the_minimum() {
 fn collapse_folds_a_card_to_its_title_bar_and_expand_restores_it() {
     let mut ui = Ui::new();
     let height = ui.card(&feed("a")).height();
-    ui.harness.get_by_label("−").click();
+    ui.harness.get_by_label("Collapse card").click();
     ui.settle();
     assert_eq!(ui.card(&feed("a")).height(), TITLE_HEIGHT);
     // The title still shows counts while collapsed.
     ui.harness.get_by_label("a title (1)");
     assert!(ui.harness.query_by_label("Item").is_none(), "body hidden");
-    ui.harness.get_by_label("+").click();
+    ui.harness.get_by_label("Expand card").click();
     ui.settle();
     assert_eq!(ui.card(&feed("a")).height(), height);
 }
@@ -775,7 +775,7 @@ fn show_all_pans_back_to_the_cards() {
     let empty = ui.empty_canvas();
     ui.drag(empty, empty - Vec2::new(800.0, 600.0));
     assert!(!ui.app().canvas_area().intersects(ui.card(&feed("a"))));
-    ui.harness.get_by_label("Show all").click();
+    ui.layout_action("Show all");
     ui.settle();
     assert!(ui.app().canvas_area().intersects(ui.card(&feed("a"))));
 }
@@ -804,7 +804,7 @@ fn dragging_a_sidebar_entry_onto_the_canvas_places_it_there() {
 #[test]
 fn save_as_names_the_arrangement_and_switches_to_it() {
     let mut ui = Ui::new();
-    ui.harness.get_by_label("Save as…").click();
+    ui.layout_action("Save as…");
     ui.settle();
     // An existing name is refused before anything is sent.
     ui.harness.get_by_label("Layout name").type_text("Ops");
@@ -902,7 +902,7 @@ fn without_a_preference_the_first_layout_opens_and_is_remembered() {
 fn rename_refuses_taken_names_then_renames_the_active_layout() {
     let mut ui = Ui::new();
     ui.ops();
-    ui.harness.get_by_label("Rename…").click();
+    ui.layout_action("Rename…");
     ui.settle();
     ui.harness.get_by_label("Rename layout");
     assert_eq!(
@@ -969,7 +969,7 @@ fn rename_refuses_taken_names_then_renames_the_active_layout() {
 fn delete_asks_for_confirmation_then_opens_the_next_layout() {
     let mut ui = Ui::new();
     ui.ops();
-    ui.harness.get_by_label("Delete…").click();
+    ui.layout_action("Delete…");
     ui.settle();
     ui.harness.get_by_label("Delete the layout “Day”?");
     ui.harness.get_by_label("Cancel").click();
@@ -981,7 +981,7 @@ fn delete_asks_for_confirmation_then_opens_the_next_layout() {
     );
     assert!(ui.ops().is_empty());
 
-    ui.harness.get_by_label("Delete…").click();
+    ui.layout_action("Delete…");
     ui.settle();
     ui.harness.get_by_label("Delete").click();
     ui.settle();
@@ -1145,7 +1145,7 @@ fn type_keys(ui: &mut Ui, text: &str) {
 fn rename_typing_replaces_the_selected_name_and_refusals_keep_focus() {
     let mut ui = Ui::new();
     ui.ops();
-    ui.harness.get_by_label("Rename…").click();
+    ui.layout_action("Rename…");
     ui.settle();
     // No click into the field: it has focus with "Day" selected.
     type_keys(&mut ui, "Ops");
@@ -1174,7 +1174,7 @@ fn buttons_on_a_card_behind_others_work_on_the_first_click() {
     let a = ui.card(&feed("a"));
     let collapse = ui
         .harness
-        .query_all_by_label("−")
+        .query_all_by_label("Collapse card")
         .map(|n| n.rect().center())
         .find(|p| a.contains(*p) && !ui.card(&feed("b")).contains(*p))
         .expect("a's collapse button is visible");
@@ -1211,7 +1211,7 @@ fn a_deleted_target_stays_as_a_placeholder_until_retargeted() {
     let before = ui.card(&Target::Board(9));
     ui.harness.get_by_label("Board 9 · deleted");
     ui.harness.get_by_label("Board 9 no longer exists");
-    ui.harness.get_by_value("Show…").click();
+    ui.harness.get_by_label("Show…").click();
     ui.settle();
     ui.harness.get_by_label("Feed: a title").click();
     ui.settle();
@@ -1261,7 +1261,7 @@ impl Ui {
         let inbox = self.card(&Target::Board(2));
         let menus: Vec<Pos2> = self
             .harness
-            .query_all_by_label("…")
+            .query_all_by_label("Item menu")
             .map(|node| node.rect().center())
             .filter(|p| inbox.contains(*p))
             .collect();
@@ -1272,9 +1272,10 @@ impl Ui {
     /// Open feed "a"'s item menu (…) for its n-th shown item.
     fn feed_menu(&mut self, n: usize) {
         let card = self.card(&feed("a"));
+
         let at = self
             .harness
-            .query_all_by_label("…")
+            .query_all_by_label("Item menu")
             .map(|node| node.rect().center())
             .filter(|p| card.contains(*p))
             .nth(n)
@@ -1287,6 +1288,13 @@ impl Ui {
         self.harness.get_by_label(label).focus();
         self.harness.step();
         type_keys(self, text);
+    }
+
+    /// Choose an entry from the layout menu in the layout bar.
+    fn layout_action(&mut self, label: &str) {
+        self.harness.get_by_label_contains("Layout: ").click();
+        self.settle();
+        self.harness.get_by_label(label).click();
     }
 
     /// A menu entry on the canvas, not the sidebar or layout bar entry
@@ -1975,13 +1983,14 @@ fn passing_over_items_or_using_their_menu_shows_no_details() {
 fn a_feed_card_shows_its_description_last_change_and_marked_items() {
     let mut ui = side_by_side();
     ui.harness.get_by_label("Open reviews waiting on me");
-    ui.harness.get_by_label("Changed 10m ago: 1 new · 1 gone");
+    ui.harness
+        .get_by_label_contains("changed 10m ago: 1 new, 1 gone");
     // Item 1 was added ten minutes ago, inside feed "a"'s one-hour window.
     ui.harness.get_by_label("new");
     ui.harness.get_by_label("1 new");
     assert!(ui.harness.query_by_label("Mark all seen").is_none());
     ui.harness
-        .get_by_label("Changed 10m ago: 1 new · 1 gone")
+        .get_by_label_contains("changed 10m ago: 1 new, 1 gone")
         .hover();
     for _ in 0..4 {
         ui.harness.step();

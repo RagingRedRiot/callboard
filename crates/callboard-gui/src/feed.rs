@@ -4,6 +4,7 @@ use crate::{
     app::{Action, WriteOp, age, coarse, drag_ghost, link, now_ms, stale},
     backend::{PromoteKind, Target},
     board,
+    theme::{self, Palette, icon},
 };
 use callboard_core::{
     feed::{Item, MetaValue},
@@ -53,73 +54,84 @@ fn item_menu(
             on_update,
         })
     };
-    ui.menu_button("…", |ui| {
-        if snoozed {
-            if ui.button("Unsnooze").clicked() {
-                actions.push(snooze(None, false));
-                ui.close();
-            }
-        } else {
-            ui.menu_button("Snooze", |ui| {
-                for (label, duration) in SNOOZE_FOR {
-                    if ui.button(label).clicked() {
-                        let until = now_ms().saturating_add(duration.as_millis() as i64);
-                        actions.push(snooze(Some(until), false));
-                        ui.close();
-                    }
-                }
-                if ui
-                    .button("Until it changes")
-                    .on_hover_text("Wake when the feed submits different content for it")
-                    .clicked()
-                {
-                    actions.push(snooze(None, true));
+    let faint = Palette::of(ui.visuals()).faint;
+    let menu = ui.menu_button(
+        theme::glyph(icon::DOTS_THREE).size(15.0).color(faint),
+        |ui| {
+            if snoozed {
+                if ui.button("Unsnooze").clicked() {
+                    actions.push(snooze(None, false));
                     ui.close();
                 }
-            });
-        }
-        ui.menu_button("Promote", |ui| {
-            if boards.is_empty() {
-                ui.weak("No boards yet");
-            }
-            for board in boards {
-                ui.push_id(board.info.id, |ui| {
-                    ui.menu_button(&board.info.name, |ui| {
-                        for (label, kind) in [
-                            ("As todo", PromoteKind::Todo),
-                            ("As note", PromoteKind::Note),
-                        ] {
-                            if ui.button(label).clicked() {
-                                actions.push(Action::Write(WriteOp::Promote {
-                                    feed: feed.to_owned(),
-                                    key: key.to_owned(),
-                                    board_id: board.info.id,
-                                    kind,
-                                }));
-                                ui.close();
-                            }
+            } else {
+                ui.menu_button("Snooze", |ui| {
+                    for (label, duration) in SNOOZE_FOR {
+                        if ui.button(label).clicked() {
+                            let until = now_ms().saturating_add(duration.as_millis() as i64);
+                            actions.push(snooze(Some(until), false));
+                            ui.close();
                         }
-                    });
+                    }
+                    if ui
+                        .button("Until it changes")
+                        .on_hover_text("Wake when the feed submits different content for it")
+                        .clicked()
+                    {
+                        actions.push(snooze(None, true));
+                        ui.close();
+                    }
                 });
             }
-        });
-    });
+            ui.menu_button("Promote", |ui| {
+                if boards.is_empty() {
+                    ui.weak("No boards yet");
+                }
+                for board in boards {
+                    ui.push_id(board.info.id, |ui| {
+                        ui.menu_button(&board.info.name, |ui| {
+                            for (label, kind) in [
+                                ("As todo", PromoteKind::Todo),
+                                ("As note", PromoteKind::Note),
+                            ] {
+                                if ui.button(label).clicked() {
+                                    actions.push(Action::Write(WriteOp::Promote {
+                                        feed: feed.to_owned(),
+                                        key: key.to_owned(),
+                                        board_id: board.info.id,
+                                        kind,
+                                    }));
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+                }
+            });
+        },
+    );
+    theme::name(&menu.response, "Item menu");
 }
 
 /// A link shortened to fit one line: no scheme, truncated with an ellipsis.
 /// Only HTTP(S) links open, and only when clicked (DESIGN.md §10.4).
-fn short_link(ui: &mut egui::Ui, url: &str) {
+/// Quiet until hovered, so a list of links does not read as a wall of blue.
+pub(crate) fn short_link(ui: &mut egui::Ui, url: &str) {
+    let p = Palette::of(ui.visuals());
     let web = url.starts_with("https://") || url.starts_with("http://");
     let shown = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .unwrap_or(url);
-    let color = if web {
-        ui.visuals().hyperlink_color
-    } else {
-        ui.visuals().weak_text_color()
-    };
-    let label = egui::Label::new(egui::RichText::new(shown).small().color(color)).truncate();
+    let id = ui.next_auto_id();
+    let hovered = web && ui.ctx().read_response(id).is_some_and(|r| r.hovered());
+    let mut text =
+        egui::RichText::new(shown)
+            .size(11.5)
+            .color(if hovered { p.accent_text } else { p.faint });
+    if hovered {
+        text = text.underline();
+    }
+    let label = egui::Label::new(text).truncate();
     if web {
         let response = ui.add(label.sense(egui::Sense::click()));
         if response
@@ -227,21 +239,51 @@ pub fn show(
     boards: &[BoardSummary],
     actions: &mut Vec<Action>,
 ) {
-    ui.label(format!(
-        "{} items · submitted {} ago{}",
-        feed.items.len(),
-        coarse(age(feed.info.last_submitted_at_ms)),
-        if stale(&feed.info) { " · stale" } else { "" }
-    ));
-    link(ui, feed.info.source_url.as_deref());
+    let p = Palette::of(ui.visuals());
     if let Some(description) = &feed.info.description {
-        ui.label(egui::RichText::new(description).italics());
+        ui.add(egui::Label::new(egui::RichText::new(description).color(p.muted)).truncate())
+            .on_hover_text(description);
     }
+    // One line that truncates rather than widening the card.
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(url) = feed.info.source_url.as_deref() {
+                let web = url.starts_with("https://") || url.starts_with("http://");
+                let open = ui.add_enabled_ui(web, |ui| {
+                    theme::icon_button(ui, icon::ARROW_SQUARE_OUT, "Open source", url)
+                });
+                if open.inner.clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                }
+            }
+            if stale(&feed.info) {
+                theme::pill(ui, "stale", p.warning_soft, p.warning);
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                let mut meta = format!(
+                    "{} · submitted {} ago",
+                    board::count(feed.items.len(), "item"),
+                    coarse(age(feed.info.last_submitted_at_ms))
+                );
+                if let Some(change) = &feed.info.last_change {
+                    meta.push_str(" · ");
+                    meta.push_str(&last_change_text(change));
+                }
+                let response = ui.add(
+                    egui::Label::new(egui::RichText::new(&meta).size(12.0).color(p.faint))
+                        .truncate(),
+                );
+                if let Some(change) = &feed.info.last_change {
+                    gone_on_hover(response, change);
+                }
+            });
+        });
+    });
     if let Some(error) = &feed.info.error {
-        ui.colored_label(ui.visuals().error_fg_color, &error.message);
-    }
-    if let Some(change) = &feed.info.last_change {
-        last_change(ui, change);
+        ui.horizontal(|ui| {
+            ui.label(theme::glyph(icon::WARNING_CIRCLE).color(p.danger));
+            ui.add(egui::Label::new(egui::RichText::new(&error.message).color(p.danger)).wrap());
+        });
     }
     let snoozed = feed
         .items
@@ -250,33 +292,43 @@ pub fn show(
         .count();
     let toggle = salt.with("show_snoozed");
     let mut show_snoozed = ui.data(|d| d.get_temp::<bool>(toggle)).unwrap_or(false);
-    ui.horizontal(|ui| {
-        if ui
-            .checkbox(&mut show_snoozed, format!("Show snoozed ({snoozed})"))
-            .changed()
-        {
-            ui.data_mut(|d| d.insert_temp(toggle, show_snoozed));
-        }
-        if feed.manual_order
-            && let Some(first) = feed.items.first()
-            && ui
-                .small_button("Reset order")
-                .on_hover_text("Return to the order the feed submits")
-                .clicked()
-        {
-            actions.push(Action::Write(WriteOp::ResetOrder {
-                feed: feed.info.name.clone(),
-                key: first.key.clone(),
-            }));
-        }
-    });
+    if snoozed > 0 || feed.manual_order {
+        ui.horizontal(|ui| {
+            if snoozed > 0
+                && ui
+                    .add(egui::Button::selectable(
+                        show_snoozed,
+                        egui::RichText::new(format!("Show snoozed ({snoozed})")).size(12.0),
+                    ))
+                    .clicked()
+            {
+                show_snoozed = !show_snoozed;
+                ui.data_mut(|d| d.insert_temp(toggle, show_snoozed));
+            }
+            if feed.manual_order
+                && let Some(first) = feed.items.first()
+                && ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Reset order").size(12.0),
+                    ))
+                    .on_hover_text("Return to the order the feed submits")
+                    .clicked()
+            {
+                actions.push(Action::Write(WriteOp::ResetOrder {
+                    feed: feed.info.name.clone(),
+                    key: first.key.clone(),
+                }));
+            }
+        });
+    }
+    ui.add_space(4.0);
     egui::ScrollArea::vertical()
         .id_salt(salt.with("feed_items"))
         .auto_shrink([false, false])
         .wheel_scroll_multiplier(wheel(scroll))
         .show(ui, |ui| {
             if feed.items.is_empty() {
-                ui.label("This feed is empty.");
+                ui.label(egui::RichText::new("This feed is empty.").color(p.faint));
             }
             // Shown items: their keys, rows, and the handle being dragged.
             let mut shown: Vec<&str> = Vec::new();
@@ -295,22 +347,20 @@ pub fn show(
                 // Highlighted while the pointer rests on it.
                 let lit = dwell.is_some_and(|d| d.row == row_id);
                 let mut frame = egui::Frame::new()
-                    .inner_margin(egui::Margin::symmetric(6, 4))
-                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin {
+                        left: 10,
+                        right: 4,
+                        top: 5,
+                        bottom: 5,
+                    })
+                    .corner_radius(theme::RADIUS_MD)
                     .begin(ui);
                 let mut grip = None;
-                let fill = item
-                    .color
-                    .as_deref()
-                    .and_then(|c| board::color_fill(c, ui.visuals()));
+                // A color marks the row with a bar at its left edge.
+                let mark = item.color.as_deref().and_then(theme::color_mark);
                 {
                     let ui = &mut frame.content_ui;
                     ui.set_width(ui.available_width());
-                    if fill.is_some() {
-                        // Full-contrast text on the colored row.
-                        ui.visuals_mut().override_text_color =
-                            Some(ui.visuals().strong_text_color());
-                    }
                     ui.push_id(&item.key, |ui| {
                         ui.horizontal_top(|ui| {
                             let handle = board::handle(ui, "Drag to reorder or promote");
@@ -344,19 +394,24 @@ pub fn show(
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
                                     ui.set_width(width);
+                                    ui.spacing_mut().item_spacing.y = 2.0;
                                     if let Some(status) = status(feed, &item.key) {
                                         ui.horizontal_wrapped(|ui| {
                                             badge(ui, status);
-                                            ui.label(egui::RichText::new(&item.title).strong());
+                                            ui.label(&item.title);
                                         });
                                     } else {
-                                        ui.label(egui::RichText::new(&item.title).strong());
+                                        ui.label(&item.title);
                                     }
                                     if let Some(url) = &item.url {
                                         short_link(ui, url);
                                     }
                                     if let Some(state) = state {
-                                        ui.weak(egui::RichText::new(snooze_text(state)).small());
+                                        ui.label(
+                                            egui::RichText::new(snooze_text(state))
+                                                .size(11.5)
+                                                .color(p.faint),
+                                        );
                                     }
                                 },
                             );
@@ -371,14 +426,19 @@ pub fn show(
                         });
                     });
                 }
-                let hover = ui.visuals().widgets.hovered.weak_bg_fill;
-                frame.frame.fill = match (fill, lit) {
-                    (Some(fill), true) => fill.lerp_to_gamma(hover, 0.4),
-                    (Some(fill), false) => fill,
-                    (None, true) => hover,
-                    (None, false) => egui::Color32::TRANSPARENT,
-                };
+                let hovered = ui.rect_contains_pointer(frame.content_ui.min_rect().expand(6.0));
+                let hover =
+                    ui.ctx()
+                        .animate_bool_with_time(row_id.with("hover"), lit || hovered, 0.12);
+                frame.frame.fill = egui::Color32::TRANSPARENT.lerp_to_gamma(p.hover, hover);
                 let rect = frame.end(ui).rect;
+                if let Some(mark) = mark {
+                    let bar = egui::Rect::from_min_max(
+                        rect.left_top() + egui::vec2(2.0, 5.0),
+                        rect.left_bottom() + egui::vec2(5.0, -5.0),
+                    );
+                    ui.painter().rect_filled(bar, 2.0, mark);
+                }
                 // Resting here: the topmost card, nothing dragged or open.
                 if scroll
                     && ui.rect_contains_pointer(rect)
@@ -410,7 +470,7 @@ pub fn show(
                         ui.painter().hline(
                             x,
                             rect.bottom() - 1.0,
-                            egui::Stroke::new(2.0, ui.visuals().selection.bg_fill),
+                            egui::Stroke::new(2.0, p.accent),
                         );
                     }
                 }
@@ -471,21 +531,11 @@ fn show_details(ui: &egui::Ui, row: egui::Id, rect: egui::Rect, feed: &Feed, ite
 
 /// A small "new" or "updated" pill.
 fn badge(ui: &mut egui::Ui, status: ChangeStatus) {
-    let (text, fill) = match status {
-        ChangeStatus::New => ("new", ui.visuals().selection.bg_fill),
-        ChangeStatus::Updated => ("updated", ui.visuals().warn_fg_color.gamma_multiply(0.6)),
+    let p = Palette::of(ui.visuals());
+    match status {
+        ChangeStatus::New => theme::pill(ui, "new", p.accent_soft, p.accent_text),
+        ChangeStatus::Updated => theme::pill(ui, "updated", p.warning_soft, p.warning),
     };
-    egui::Frame::new()
-        .fill(fill)
-        .corner_radius(6.0)
-        .inner_margin(egui::Margin::symmetric(5, 0))
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(text)
-                    .small()
-                    .color(ui.visuals().strong_text_color()),
-            )
-        });
 }
 
 /// "Added 2h ago · changed 10m ago"; none for items that predate change
@@ -501,8 +551,8 @@ pub(crate) fn change_text(change: &ItemChange) -> Option<String> {
     }
 }
 
-/// "Changed 10m ago: 2 new · 1 updated · 1 gone", with the gone titles on hover.
-fn last_change(ui: &mut egui::Ui, change: &LastChange) {
+/// "changed 10m ago: 2 new, 1 updated, 1 gone".
+fn last_change_text(change: &LastChange) -> String {
     let parts: Vec<String> = [
         (change.added, "new"),
         (change.updated, "updated"),
@@ -512,23 +562,28 @@ fn last_change(ui: &mut egui::Ui, change: &LastChange) {
     .filter(|(n, _)| *n > 0)
     .map(|(n, what)| format!("{n} {what}"))
     .collect();
-    let response = ui.weak(format!(
-        "Changed {} ago: {}",
+    format!(
+        "changed {} ago: {}",
         coarse(age(change.at_ms)),
-        parts.join(" · ")
-    ));
-    if !change.removed_items.is_empty() {
-        response.on_hover_ui(|ui| {
-            ui.strong("Gone in that change");
-            for item in &change.removed_items {
-                ui.label(&item.title);
-            }
-            let more = change.removed.saturating_sub(change.removed_items.len());
-            if more > 0 {
-                ui.weak(format!("and {more} more"));
-            }
-        });
+        parts.join(", ")
+    )
+}
+
+/// The titles a change removed, on hover.
+fn gone_on_hover(response: egui::Response, change: &LastChange) {
+    if change.removed_items.is_empty() {
+        return;
     }
+    response.on_hover_ui(|ui| {
+        ui.strong("Gone in that change");
+        for item in &change.removed_items {
+            ui.label(&item.title);
+        }
+        let more = change.removed.saturating_sub(change.removed_items.len());
+        if more > 0 {
+            ui.weak(format!("and {more} more"));
+        }
+    });
 }
 
 /// An item's mark now, from its times and the feed's `new_for` window

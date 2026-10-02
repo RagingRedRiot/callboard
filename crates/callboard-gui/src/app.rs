@@ -7,6 +7,7 @@ use crate::{
     feed,
     quick::{self, Choice, QuickOpen},
     sync::{Link, Outcome, POLL_INTERVAL, Scheduler},
+    theme::{self, Palette, icon},
     workspace::{self, CardState, LayoutEntry, LayoutKey, Layouts, TITLE_HEIGHT},
 };
 use callboard::lifecycle::Paths;
@@ -178,6 +179,35 @@ impl Cache {
         } else {
             None
         }
+    }
+
+    /// The card's title as drawn: name, a muted count, and a status mark.
+    /// [`Cache::card_title`] is the same as plain text, its accessible name.
+    fn card_heading(&self, target: &Target, p: &Palette) -> egui::text::LayoutJob {
+        let mut job = egui::text::LayoutJob::default();
+        let font = |size, family| egui::FontId::new(size, family);
+        let format = |font, color| egui::TextFormat::simple(font, color);
+        job.append(
+            &self.title(target),
+            0.0,
+            format(font(14.0, theme::medium()), p.text),
+        );
+        if let Some(counts) = self.counts(target) {
+            job.append(
+                &counts.shown.to_string(),
+                8.0,
+                format(font(13.0, egui::FontFamily::Proportional), p.faint),
+            );
+        }
+        if let Some(marker) = self.marker(target) {
+            let color = if marker == "error" {
+                p.danger
+            } else {
+                p.warning
+            };
+            job.append(marker, 8.0, format(font(12.0, theme::medium()), color));
+        }
+        job
     }
 
     fn card_title(&self, target: &Target) -> String {
@@ -412,6 +442,7 @@ impl App {
         auto_start_disabled: bool,
         ctx: egui::Context,
     ) -> Result<Self, String> {
+        theme::install(&ctx);
         let runtime = || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -1200,6 +1231,10 @@ impl App {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
+        theme::install(ui.ctx());
+        if !theme::ready(ui.ctx()) {
+            return;
+        }
         let now = Instant::now();
         if ui.input(|i| i.viewport().close_requested()) && !self.allow_close {
             self.closing = true;
@@ -1228,6 +1263,11 @@ impl App {
             actions.push(Action::QuickOpen);
         }
         egui::Panel::top("layout_bar")
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
+            )
             .show(ui, |ui| self.layout_bar(ui, now, &entries, &mut actions));
         if let Some(error) = self.worker_error.clone().or(self.cache.error.clone()) {
             egui::Panel::top("error_bar").show(ui, |ui| self.error_bar(ui, &error));
@@ -1235,6 +1275,9 @@ impl App {
         if let Some(error) = &self.write_error {
             egui::Panel::top("write_error_bar").show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    ui.label(
+                        theme::glyph(icon::WARNING_CIRCLE).color(Palette::of(ui.visuals()).danger),
+                    );
                     let first_line = error.lines().next().unwrap_or_default();
                     ui.add(
                         egui::Label::new(
@@ -1250,7 +1293,12 @@ impl App {
             });
         }
         egui::Panel::left("resources")
-            .default_size(240.0)
+            .default_size(264.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(ui.visuals().panel_fill)
+                    .inner_margin(egui::Margin::symmetric(10, 10)),
+            )
             .show(ui, |ui| self.sidebar(ui, &entries, &placed, &mut actions));
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(canvas_fill(ui.visuals())))
@@ -1362,82 +1410,79 @@ impl App {
         entries: &[LayoutEntry],
         actions: &mut Vec<Action>,
     ) {
+        let p = Palette::of(ui.visuals());
         ui.horizontal(|ui| {
-            let entry = entries.iter().find(|e| e.active);
-            ui.strong(format!("Layout: {}", self.layouts.active_key().label()));
-            if let Some(entry) = entry {
+            let active = self.layouts.active_key();
+            let muted = Palette::of(ui.visuals()).muted;
+            let menu = ui.menu_button(
+                (
+                    theme::glyph(icon::SQUARES_FOUR).color(muted),
+                    theme::strong(active.label()),
+                    theme::glyph(icon::CARET_DOWN).size(11.0).color(muted),
+                ),
+                |ui| self.layout_menu(ui, entries, actions),
+            );
+            theme::name(&menu.response, &format!("Layout: {}", active.label()));
+            menu.response
+                .on_hover_text("Switch, save, rename, or delete layouts");
+            if let Some(entry) = entries.iter().find(|e| e.active) {
                 layout_status(ui, entry, actions);
             }
-            ui.separator();
-            if ui
-                .small_button("Save as…")
-                .on_hover_text("Save this arrangement as a new named layout")
-                .clicked()
-            {
-                actions.push(Action::Prompt(PromptKind::SaveAs));
-            }
-            if ui
-                .small_button("New layout…")
-                .on_hover_text("Create an empty named layout")
-                .clicked()
-            {
-                actions.push(Action::Prompt(PromptKind::New));
-            }
-            if let LayoutKey::Saved(name) = self.layouts.active_key() {
-                if ui
-                    .small_button("Rename…")
-                    .on_hover_text("Rename this layout")
-                    .clicked()
-                {
-                    actions.push(Action::Prompt(PromptKind::Rename));
-                }
-                if ui
-                    .small_button("Delete…")
-                    .on_hover_text("Delete this saved layout")
-                    .clicked()
-                {
-                    actions.push(Action::ConfirmDelete(DeleteSubject::Layout(name.clone())));
-                }
-            }
-            ui.separator();
-            if ui
-                .add_enabled(
-                    !self.layouts.active().cards.is_empty(),
-                    egui::Button::new("Show all").small(),
+            ui.add_space(12.0);
+            let search = ui
+                .add(
+                    egui::Button::new((
+                        theme::glyph(icon::MAGNIFYING_GLASS).color(p.muted),
+                        egui::RichText::new("Search or jump to…").color(p.muted),
+                    ))
+                    .shortcut_text(egui::RichText::new("Ctrl K").size(11.0).color(p.faint))
+                    .fill(p.raised)
+                    .min_size(egui::vec2(280.0, 26.0)),
                 )
-                .on_hover_text("Pan to the cards, including any panned out of sight")
-                .clicked()
-            {
-                actions.push(Action::ShowAll);
-            }
-            if ui
-                .small_button("Open…")
-                .on_hover_text("Find a feed, board, or layout by name (Ctrl+K)")
-                .clicked()
-            {
+                .on_hover_text("Find a feed, board, or layout by name (Ctrl+K)");
+            theme::name(&search, "Open…");
+            if search.clicked() {
                 actions.push(Action::QuickOpen);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(!self.scheduler.busy(), egui::Button::new("Refresh"))
-                    .clicked()
-                {
+                let refresh = ui.add_enabled_ui(!self.scheduler.busy(), |ui| {
+                    theme::icon_button(
+                        ui,
+                        icon::ARROWS_CLOCKWISE,
+                        "Refresh",
+                        "Refetch everything now",
+                    )
+                });
+                if refresh.inner.clicked() {
                     actions.push(Action::Refresh);
                 }
                 if self.scheduler.busy() {
                     ui.spinner();
                 }
                 if let Some(at) = self.cache.refreshed_at {
-                    ui.weak(format!(
-                        "updated {} ago",
-                        coarse(Duration::from_secs(now.duration_since(at).as_secs()))
-                    ));
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "updated {} ago",
+                            coarse(Duration::from_secs(now.duration_since(at).as_secs()))
+                        ))
+                        .size(12.0)
+                        .color(p.faint),
+                    );
                 }
-                let (text, hover) = match self.scheduler.link(now) {
-                    Link::Live => ("Live".to_string(), "Receiving change notices.".to_string()),
-                    Link::Connecting => ("Connecting…".into(), "Opening the event stream.".into()),
+                let (text, dot, hover) = match self.scheduler.link(now) {
+                    Link::Live => (
+                        "Live".to_string(),
+                        p.success,
+                        "Receiving change notices.".to_string(),
+                    ),
+                    Link::Connecting => (
+                        "Connecting…".into(),
+                        p.faint,
+                        "Opening the event stream.".into(),
+                    ),
                     Link::Polling => (
                         format!("Polling every {} s", POLL_INTERVAL.as_secs()),
+                        p.warning,
                         format!(
                             "The event stream is unavailable{}; refreshing on a timer until it reconnects.",
                             self.scheduler
@@ -1447,15 +1492,84 @@ impl App {
                         ),
                     ),
                 };
-                ui.label(text).on_hover_text(hover);
+                ui.label(egui::RichText::new(text).size(12.0).color(p.muted))
+                    .on_hover_text(hover);
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), 3.5, dot);
                 if let Some(build) = self.service_build.as_deref()
                     && build != callboard::BUILD
                 {
-                    ui.colored_label(ui.visuals().warn_fg_color, "Version mismatch")
+                    theme::pill(ui, "Version mismatch", p.warning_soft, p.warning)
                         .on_hover_text(build_mismatch(build));
                 }
             });
         });
+    }
+
+    /// The layout menu: switch layouts, and save, create, rename, or delete.
+    fn layout_menu(&self, ui: &mut egui::Ui, entries: &[LayoutEntry], actions: &mut Vec<Action>) {
+        ui.set_min_width(220.0);
+        ui.label(theme::eyebrow(ui, "Layouts"));
+        for entry in entries {
+            let mut text = entry.key.label().to_string();
+            if entry.key == LayoutKey::Unsaved {
+                text.push_str(" (not saved)");
+            }
+            if ui
+                .add(egui::Button::selectable(entry.active, text))
+                .clicked()
+            {
+                if !entry.active {
+                    actions.push(Action::Switch(entry.key.clone()));
+                }
+                ui.close();
+            }
+        }
+        ui.separator();
+        let mut item = |ui: &mut egui::Ui, text: &str, hint: &str, action: Action| {
+            if ui.button(text).on_hover_text(hint).clicked() {
+                actions.push(action);
+                ui.close();
+            }
+        };
+        item(
+            ui,
+            "Save as…",
+            "Save this arrangement as a new named layout",
+            Action::Prompt(PromptKind::SaveAs),
+        );
+        item(
+            ui,
+            "New layout…",
+            "Create an empty named layout",
+            Action::Prompt(PromptKind::New),
+        );
+        if let LayoutKey::Saved(name) = self.layouts.active_key() {
+            item(
+                ui,
+                "Rename…",
+                "Rename this layout",
+                Action::Prompt(PromptKind::Rename),
+            );
+            item(
+                ui,
+                "Delete…",
+                "Delete this saved layout",
+                Action::ConfirmDelete(DeleteSubject::Layout(name.clone())),
+            );
+        }
+        ui.separator();
+        if ui
+            .add_enabled(
+                !self.layouts.active().cards.is_empty(),
+                egui::Button::new("Show all"),
+            )
+            .on_hover_text("Pan to the cards, including any panned out of sight")
+            .clicked()
+        {
+            actions.push(Action::ShowAll);
+            ui.close();
+        }
     }
 
     /// A dialog for naming a layout. Enter submits, Escape cancels.
@@ -1582,39 +1696,50 @@ impl App {
         placed: &BTreeSet<Target>,
         actions: &mut Vec<Action>,
     ) {
+        let p = Palette::of(ui.visuals());
         let canvas = self.layouts.active();
         let front = canvas.focused_target().cloned();
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.menu_button("Add card…", |ui| {
-                // Prefixed: a feed and a board may share a title.
-                let choices =
-                    self.cache
-                        .feeds
-                        .iter()
-                        .map(|f| {
-                            (
-                                Target::Feed(f.info.name.clone()),
-                                format!("Feed: {}", f.info.title),
-                            )
-                        })
-                        .chain(
-                            self.cache.boards.iter().map(|b| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            let add = ui.menu_button(
+                (
+                    theme::glyph(icon::PLUS).color(p.muted),
+                    egui::RichText::new("Add card…").color(p.muted),
+                ),
+                |ui| {
+                    // Prefixed: a feed and a board may share a title.
+                    let choices =
+                        self.cache
+                            .feeds
+                            .iter()
+                            .map(|f| {
+                                (
+                                    Target::Feed(f.info.name.clone()),
+                                    format!("Feed: {}", f.info.title),
+                                )
+                            })
+                            .chain(self.cache.boards.iter().map(|b| {
                                 (Target::Board(b.info.id), format!("Board: {}", b.info.name))
-                            }),
-                        )
-                        .chain([(Target::Archive, "Deleted-board archive".to_owned())]);
-                for (target, mut title) in choices {
-                    if placed.contains(&target) {
-                        title.push_str(" (on canvas)");
+                            }))
+                            .chain([(Target::Archive, "Deleted-board archive".to_owned())]);
+                    for (target, mut title) in choices {
+                        if placed.contains(&target) {
+                            title.push_str(" (on canvas)");
+                        }
+                        if ui.button(title).clicked() {
+                            actions.push(Action::Show(target));
+                            ui.close();
+                        }
                     }
-                    if ui.button(title).clicked() {
-                        actions.push(Action::Show(target));
-                        ui.close();
-                    }
-                }
-            });
-            ui.separator();
-            ui.heading("Layouts");
+                },
+            );
+            theme::name(&add.response, "Add card…");
+            let section = |ui: &mut egui::Ui, title: &str| {
+                ui.add_space(12.0);
+                ui.label(theme::eyebrow(ui, title));
+                ui.add_space(2.0);
+            };
+            section(ui, "Layouts");
             for entry in entries {
                 let mut text = entry.key.label().to_string();
                 if entry.key == LayoutKey::Unsaved {
@@ -1622,12 +1747,16 @@ impl App {
                 } else if entry.save_error.is_some() {
                     text.push_str(" · save failed");
                 }
-                if ui.selectable_label(entry.active, text).clicked() && !entry.active {
+                let row = theme::list_row(ui, entry.active, |ui| {
+                    ui.label(theme::glyph(icon::SQUARES_FOUR).color(p.faint));
+                    theme::row_text(ui, &text);
+                });
+                theme::name(&row, &text);
+                if row.clicked() && !entry.active {
                     actions.push(Action::Switch(entry.key.clone()));
                 }
             }
-            ui.separator();
-            ui.heading("Feeds");
+            section(ui, "Feeds");
             if !self.cache.lists_loaded() {
                 ui.weak("Loading…");
             } else if self.cache.feeds.is_empty() {
@@ -1649,16 +1778,21 @@ impl App {
                     }
                 });
             }
-            ui.separator();
+            ui.add_space(12.0);
             ui.horizontal(|ui| {
-                ui.heading("Boards");
-                if ui
-                    .small_button("New board…")
-                    .on_hover_text("Create a board and place its card")
+                ui.label(theme::eyebrow(ui, "Boards"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::icon_button(
+                        ui,
+                        icon::PLUS,
+                        "New board…",
+                        "Create a board and place its card",
+                    )
                     .clicked()
-                {
-                    actions.push(Action::Prompt(PromptKind::NewBoard));
-                }
+                    {
+                        actions.push(Action::Prompt(PromptKind::NewBoard));
+                    }
+                });
             });
             if self.cache.lists_loaded() && self.cache.boards.is_empty() {
                 ui.weak("No boards yet");
@@ -1669,12 +1803,18 @@ impl App {
                     ui.label(format!("Board ID {}", board.id));
                 });
             }
-            ui.separator();
+            ui.add_space(6.0);
             self.entry(ui, &Target::Archive, placed, &front, actions, |ui| {
                 ui.label("Items archived from deleted boards. Not saved in layouts.");
             });
-            ui.separator();
-            ui.weak("Click to show a card. Drag an entry onto the canvas to place it there.");
+            ui.add_space(16.0);
+            ui.label(
+                egui::RichText::new(
+                    "Click to show a card. Drag an entry onto the canvas to place it there.",
+                )
+                .size(11.5)
+                .color(p.faint),
+            );
         });
     }
 
@@ -1687,100 +1827,122 @@ impl App {
         actions: &mut Vec<Action>,
         details: impl FnOnce(&mut egui::Ui),
     ) {
-        ui.horizontal(|ui| {
-            // A board's color as a small swatch before its name.
-            if let Some(fill) = self
-                .cache
-                .board_color(target)
-                .and_then(|c| board::color_swatch(c, ui.visuals()))
-            {
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                // Round, so it does not read as a checkbox.
-                ui.painter().circle_filled(rect.center(), 5.0, fill);
-            }
-            let title = self.cache.title(target);
-            let text = if placed.contains(target) {
-                egui::RichText::new(&title).strong()
-            } else {
-                egui::RichText::new(&title)
-            };
-            let response = ui
-                .selectable_label(front.as_ref() == Some(target), text)
-                .interact(egui::Sense::click_and_drag())
-                .on_hover_ui(|ui| {
-                    details(ui);
-                    if placed.contains(target) {
-                        ui.weak("On the canvas");
+        let p = Palette::of(ui.visuals());
+        let title = self.cache.title(target);
+        let on_canvas = placed.contains(target);
+        let response = theme::list_row(ui, front.as_ref() == Some(target), |ui| {
+            // Counts and markers on the right, then the icon and the name.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                match self.cache.marker(target) {
+                    Some("error") => {
+                        ui.label(theme::glyph(icon::WARNING_CIRCLE).color(p.danger));
                     }
+                    Some(marker) => {
+                        ui.label(egui::RichText::new(marker).size(11.0).color(p.warning));
+                    }
+                    None => (),
+                }
+                if let Some(counts) = self.cache.counts(target) {
+                    if counts.snoozed > 0 {
+                        let snoozed = ui.label(
+                            egui::RichText::new(format!("+{}", counts.snoozed))
+                                .size(11.5)
+                                .color(p.faint),
+                        );
+                        let name = format!("+{} snoozed", counts.snoozed);
+                        snoozed.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &name)
+                        });
+                    }
+                    if counts.marked > 0 {
+                        theme::pill(
+                            ui,
+                            &format!("{} new", counts.marked),
+                            p.accent_soft,
+                            p.accent_text,
+                        );
+                    }
+                    ui.label(
+                        egui::RichText::new(counts.shown.to_string())
+                            .size(12.0)
+                            .color(p.faint),
+                    );
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    match (target, self.cache.board_color(target)) {
+                        (Target::Board(_), Some(color)) => {
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                            if let Some(mark) = theme::color_mark(color) {
+                                ui.painter().circle_filled(rect.center(), 4.5, mark);
+                            }
+                        }
+                        (Target::Board(_), None) => {
+                            ui.label(theme::glyph(icon::KANBAN).color(p.faint));
+                        }
+                        (Target::Feed(_), _) => {
+                            ui.label(theme::glyph(icon::RSS_SIMPLE).color(p.faint));
+                        }
+                        (Target::Archive, _) => {
+                            ui.label(theme::glyph(icon::ARCHIVE).color(p.faint));
+                        }
+                    }
+                    let color = if on_canvas { p.text } else { p.muted };
+                    theme::row_text(ui, egui::RichText::new(&title).color(color));
                 });
-            if response.clicked() {
-                actions.push(Action::Show(target.clone()));
-            }
-            if response.dragged() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                if let Some(pos) = ui.ctx().pointer_interact_pos() {
-                    drag_ghost(ui.ctx(), pos, &title);
-                }
-            }
-            if response.drag_stopped()
-                && let Some(pos) = ui.ctx().pointer_interact_pos()
-                && self.canvas_area.contains(pos)
-            {
-                // The pointer lands on the new card's title bar.
-                let at = self.layouts.active().view + (pos - self.canvas_area.min)
-                    - egui::vec2(DROP_GRAB.x, DROP_GRAB.y);
-                actions.push(Action::PlaceAt(target.clone(), at.round()));
-            }
-            response.context_menu(|ui| {
-                if ui.button("Show card").clicked() {
-                    actions.push(Action::Show(target.clone()));
-                    ui.close();
-                }
-                if placed.contains(target) && ui.button("Remove card").clicked() {
-                    actions.push(Action::Card {
-                        canvas: self.layouts.active().id,
-                        target: target.clone(),
-                        op: CardOp::Close,
-                    });
-                    ui.close();
-                }
-                if let Target::Board(id) = target {
-                    ui.separator();
-                    if ui.button("Rename board…").clicked() {
-                        actions.push(Action::Prompt(PromptKind::RenameBoard(*id)));
-                        ui.close();
-                    }
-                    if ui.button("Delete board…").clicked() {
-                        actions.push(Action::ConfirmDelete(DeleteSubject::Board {
-                            id: *id,
-                            name: title.clone(),
-                        }));
-                        ui.close();
-                    }
-                }
             });
-            if let Some(counts) = self.cache.counts(target) {
-                ui.weak(counts.shown.to_string());
-                if counts.marked > 0 {
-                    ui.colored_label(
-                        ui.visuals().selection.stroke.color,
-                        format!("{} new", counts.marked),
-                    )
-                    .on_hover_text("New or updated within the feed's window");
-                }
-                if counts.snoozed > 0 {
-                    ui.weak(format!("+{} snoozed", counts.snoozed));
-                }
+        });
+        theme::name(&response, &title);
+        let response = response.on_hover_ui(|ui| {
+            details(ui);
+            if on_canvas {
+                ui.weak("On the canvas");
             }
-            match self.cache.marker(target) {
-                Some(marker @ "error") => {
-                    ui.colored_label(ui.visuals().error_fg_color, marker);
+        });
+        if response.clicked() {
+            actions.push(Action::Show(target.clone()));
+        }
+        if response.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                drag_ghost(ui.ctx(), pos, &title);
+            }
+        }
+        if response.drag_stopped()
+            && let Some(pos) = ui.ctx().pointer_interact_pos()
+            && self.canvas_area.contains(pos)
+        {
+            // The pointer lands on the new card's title bar.
+            let at = self.layouts.active().view + (pos - self.canvas_area.min)
+                - egui::vec2(DROP_GRAB.x, DROP_GRAB.y);
+            actions.push(Action::PlaceAt(target.clone(), at.round()));
+        }
+        response.context_menu(|ui| {
+            if ui.button("Show card").clicked() {
+                actions.push(Action::Show(target.clone()));
+                ui.close();
+            }
+            if on_canvas && ui.button("Remove card").clicked() {
+                actions.push(Action::Card {
+                    canvas: self.layouts.active().id,
+                    target: target.clone(),
+                    op: CardOp::Close,
+                });
+                ui.close();
+            }
+            if let Target::Board(id) = target {
+                ui.separator();
+                if ui.button("Rename board…").clicked() {
+                    actions.push(Action::Prompt(PromptKind::RenameBoard(*id)));
+                    ui.close();
                 }
-                Some(marker) => {
-                    ui.colored_label(ui.visuals().warn_fg_color, marker);
+                if ui.button("Delete board…").clicked() {
+                    actions.push(Action::ConfirmDelete(DeleteSubject::Board {
+                        id: *id,
+                        name: title.clone(),
+                    }));
+                    ui.close();
                 }
-                None => (),
             }
         });
     }
@@ -1796,7 +1958,9 @@ impl App {
             "Retrying automatically."
         };
         ui.horizontal(|ui| {
-            ui.colored_label(ui.visuals().error_fg_color, "Unable to refresh:");
+            let p = Palette::of(ui.visuals());
+            ui.label(theme::glyph(icon::WARNING_CIRCLE).color(p.danger));
+            ui.colored_label(p.danger, "Unable to refresh:");
             let first_line = error.lines().next().unwrap_or_default();
             ui.add(egui::Label::new(first_line).truncate())
                 .on_hover_text(format!("{error}\n\n{hint}"));
@@ -1870,6 +2034,7 @@ impl App {
         }
 
         // Registered first, so every card widget sits above it.
+        dot_grid(ui, area, canvas.view);
         let background = ui.interact(
             area,
             ui.id().with(("canvas", canvas.id)),
@@ -1882,13 +2047,19 @@ impl App {
             });
         }
         if canvas.cards.is_empty() {
-            ui.put(
-                egui::Rect::from_center_size(area.center(), egui::vec2(560.0, 60.0)),
+            let p = Palette::of(ui.visuals());
+            let rect = egui::Rect::from_center_size(area.center(), egui::vec2(420.0, 120.0));
+            let mut empty = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down(egui::Align::Center)),
+            );
+            empty.label(theme::glyph(icon::SQUARES_FOUR).size(28.0).color(p.faint));
+            empty.label(theme::strong("No cards in this layout").size(16.0));
+            empty.add(
                 egui::Label::new(
-                    egui::RichText::new(
-                        "No cards in this layout. Click a feed or board in the sidebar, or drag one here.",
-                    )
-                    .weak(),
+                    egui::RichText::new("Click a feed or board in the sidebar, or drag one here.")
+                        .color(p.muted),
                 )
                 .selectable(false),
             );
@@ -1951,35 +2122,42 @@ impl App {
         child.interact(rect, salt.with("blocker"), egui::Sense::click_and_drag());
 
         let visuals = child.visuals().clone();
+        let p = Palette::of(&visuals);
+        let radius = egui::CornerRadius::same(theme::RADIUS_LG);
+        child
+            .painter()
+            .add(visuals.window_shadow.as_shape(rect, radius));
         let stroke = if front {
-            visuals.selection.stroke
+            egui::Stroke::new(1.5, p.accent)
         } else {
-            visuals.window_stroke
+            egui::Stroke::new(1.0, p.hairline)
         };
-        child.painter().rect(
-            rect,
-            6.0,
-            visuals.window_fill,
-            stroke,
-            egui::StrokeKind::Inside,
-        );
+        child
+            .painter()
+            .rect(rect, radius, p.surface, stroke, egui::StrokeKind::Inside);
         let title_rect =
             egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), TITLE_HEIGHT));
-        // A board's color tints its title bar (DESIGN.md §6.3).
-        let title_fill = self
-            .cache
-            .board_color(target)
-            .and_then(|c| board::color_fill(c, &visuals));
-        child.painter().rect_filled(
-            title_rect.shrink(1.0),
-            egui::CornerRadius {
-                nw: 5,
-                ne: 5,
-                sw: if card.collapsed { 5 } else { 0 },
-                se: if card.collapsed { 5 } else { 0 },
-            },
-            title_fill.unwrap_or(visuals.faint_bg_color),
-        );
+        // A board's color runs along the card's top edge (DESIGN.md §6.3).
+        if let Some(mark) = self.cache.board_color(target).and_then(theme::color_mark) {
+            let band = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 4.0));
+            child.painter().rect_filled(
+                band,
+                egui::CornerRadius {
+                    nw: theme::RADIUS_LG,
+                    ne: theme::RADIUS_LG,
+                    sw: 0,
+                    se: 0,
+                },
+                mark,
+            );
+        }
+        if !card.collapsed {
+            child.painter().hline(
+                rect.x_range().shrink(1.0),
+                title_rect.bottom(),
+                egui::Stroke::new(1.0, p.hairline),
+            );
+        }
         let title = child.interact(
             title_rect,
             salt.with("title"),
@@ -1993,45 +2171,58 @@ impl App {
         }
         let mut bar = child.new_child(
             egui::UiBuilder::new()
-                .max_rect(title_rect.shrink2(egui::vec2(8.0, 3.0)))
+                .max_rect(title_rect.shrink2(egui::vec2(10.0, 4.0)))
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
         bar.set_clip_rect(title_rect.intersect(area));
-        if title_fill.is_some() {
-            // Full-contrast title on the board's color.
-            bar.visuals_mut().override_text_color = Some(visuals.strong_text_color());
-        }
-        if bar
-            .small_button("×")
-            .on_hover_text("Remove this card from the layout")
-            .clicked()
+        bar.spacing_mut().item_spacing.x = 2.0;
+        if theme::icon_button(
+            &mut bar,
+            icon::X,
+            "Close card",
+            "Remove this card from the layout",
+        )
+        .clicked()
         {
             actions.push(act(CardOp::Close));
         }
-        let (fold, hint) = if card.collapsed {
-            ("+", "Expand")
+        let (fold, name, hint) = if card.collapsed {
+            (icon::PLUS, "Expand card", "Expand")
         } else {
-            ("−", "Collapse to the title bar")
+            (icon::MINUS, "Collapse card", "Collapse to the title bar")
         };
-        if bar.small_button(fold).on_hover_text(hint).clicked() {
+        if theme::icon_button(&mut bar, fold, name, hint).clicked() {
             actions.push(act(CardOp::ToggleCollapsed));
         }
         self.retarget_menu(&mut bar, canvas, target, actions);
         bar.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            let title = self.cache.card_title(target);
-            ui.add(
-                egui::Label::new(egui::RichText::new(title).strong())
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let glyph = match target {
+                Target::Feed(_) => icon::RSS_SIMPLE,
+                Target::Board(_) => icon::KANBAN,
+                Target::Archive => icon::ARCHIVE,
+            };
+            ui.label(theme::glyph(glyph).color(p.faint));
+            let label = ui.add(
+                egui::Label::new(self.cache.card_heading(target, p))
                     .truncate()
                     .selectable(false),
             );
+            label.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Label,
+                    true,
+                    self.cache.card_title(target),
+                )
+            });
         });
 
         if card.collapsed {
             return;
         }
         let body = egui::Rect::from_min_max(
-            egui::pos2(rect.min.x + 8.0, rect.min.y + TITLE_HEIGHT + 6.0),
-            rect.max - egui::vec2(8.0, 8.0),
+            egui::pos2(rect.min.x + 12.0, rect.min.y + TITLE_HEIGHT + 8.0),
+            rect.max - egui::vec2(10.0, 10.0),
         );
         let mut body_ui = child.new_child(egui::UiBuilder::new().max_rect(body));
         body_ui.set_clip_rect(body.intersect(area));
@@ -2073,7 +2264,7 @@ impl App {
             }
         }
         // A visible corner mark: three short diagonal strokes.
-        let mark = egui::Stroke::new(1.0, visuals.weak_text_color());
+        let mark = egui::Stroke::new(1.0, Palette::of(&visuals).grid);
         for step in [4.0, 8.0, 12.0] {
             child.painter().line_segment(
                 [
@@ -2095,39 +2286,44 @@ impl App {
         actions: &mut Vec<Action>,
     ) {
         let mut chosen = None;
-        egui::ComboBox::from_id_salt(canvas.id.with(("retarget", current)))
-            .selected_text("Show…")
-            .width(64.0)
-            .show_ui(ui, |ui| {
-                // Prefixed: a feed and a board may share a title.
-                let choices =
-                    self.cache
-                        .feeds
-                        .iter()
-                        .map(|f| {
-                            (
-                                Target::Feed(f.info.name.clone()),
-                                format!("Feed: {}", f.info.title),
-                            )
-                        })
-                        .chain(
-                            self.cache.boards.iter().map(|b| {
+        let muted = Palette::of(ui.visuals()).muted;
+        let menu =
+            ui.menu_button(
+                theme::glyph(icon::ARROWS_LEFT_RIGHT)
+                    .size(15.0)
+                    .color(muted),
+                |ui| {
+                    ui.set_min_width(220.0);
+                    // Prefixed: a feed and a board may share a title.
+                    let choices =
+                        self.cache
+                            .feeds
+                            .iter()
+                            .map(|f| {
+                                (
+                                    Target::Feed(f.info.name.clone()),
+                                    format!("Feed: {}", f.info.title),
+                                )
+                            })
+                            .chain(self.cache.boards.iter().map(|b| {
                                 (Target::Board(b.info.id), format!("Board: {}", b.info.name))
-                            }),
-                        )
-                        .chain([(Target::Archive, "Deleted-board archive".to_string())]);
-                for (target, title) in choices {
-                    let placed = canvas.find(&target).is_some();
-                    let response = ui.add_enabled(
-                        !placed || &target == current,
-                        egui::Button::selectable(&target == current, title),
-                    );
-                    if response.clicked() {
-                        chosen = Some(target);
+                            }))
+                            .chain([(Target::Archive, "Deleted-board archive".to_string())]);
+                    for (target, title) in choices {
+                        let placed = canvas.find(&target).is_some();
+                        let response = ui.add_enabled(
+                            !placed || &target == current,
+                            egui::Button::selectable(&target == current, title),
+                        );
+                        if response.clicked() {
+                            chosen = Some(target);
+                            ui.close();
+                        }
                     }
-                }
-            })
-            .response
+                },
+            );
+        theme::name(&menu.response, "Show…");
+        menu.response
             .on_hover_text("Point this card at another feed or board");
         if let Some(target) = chosen.filter(|t| t != current) {
             actions.push(Action::Card {
@@ -2194,20 +2390,23 @@ pub(crate) fn drag_ghost(ctx: &egui::Context, pos: egui::Pos2, title: &str) {
         egui::Id::new("card_drag_ghost"),
     ));
     let visuals = ctx.global_style().visuals.clone();
-    let rect = egui::Rect::from_min_size(pos - DROP_GRAB, egui::vec2(200.0, TITLE_HEIGHT));
+    let p = Palette::of(&visuals);
+    let rect = egui::Rect::from_min_size(pos - DROP_GRAB, egui::vec2(220.0, TITLE_HEIGHT));
+    let radius = egui::CornerRadius::same(theme::RADIUS_LG);
+    painter.add(visuals.window_shadow.as_shape(rect, radius));
     painter.rect(
         rect,
-        5.0,
-        visuals.window_fill.gamma_multiply(0.9),
-        visuals.selection.stroke,
+        radius,
+        p.surface.gamma_multiply(0.96),
+        egui::Stroke::new(1.5, p.accent),
         egui::StrokeKind::Inside,
     );
     painter.text(
-        rect.left_center() + egui::vec2(8.0, 0.0),
+        rect.left_center() + egui::vec2(12.0, 0.0),
         egui::Align2::LEFT_CENTER,
         title,
-        egui::FontId::proportional(13.0),
-        visuals.strong_text_color(),
+        egui::FontId::new(13.5, theme::medium()),
+        p.text,
     );
 }
 
@@ -2275,23 +2474,27 @@ impl eframe::App for App {
 
 /// Save state of the active layout, for the layout bar.
 fn layout_status(ui: &mut egui::Ui, entry: &LayoutEntry, actions: &mut Vec<Action>) {
+    let p = Palette::of(ui.visuals());
+    let quiet = |ui: &mut egui::Ui, text: &str| {
+        ui.label(egui::RichText::new(text).size(12.0).color(p.faint))
+    };
     if entry.key == LayoutKey::Unsaved {
-        ui.weak("not saved; use Save as… to keep it");
+        quiet(ui, "not saved; use Save as… to keep it");
         return;
     }
     if let Some(error) = &entry.save_error {
-        ui.colored_label(ui.visuals().error_fg_color, "not saved (retrying)")
+        ui.colored_label(p.danger, "not saved (retrying)")
             .on_hover_text(error);
     } else if entry.saving || entry.pending {
-        ui.weak("saving…");
+        quiet(ui, "saving…");
     } else {
-        ui.weak("saved");
+        quiet(ui, "saved");
     }
     if entry.unsaveable {
-        ui.weak("· the archive card is not saved in layouts");
+        quiet(ui, "· the archive card is not saved in layouts");
     }
     if entry.outdated && !entry.pending {
-        ui.colored_label(ui.visuals().warn_fg_color, "changed in another window");
+        ui.colored_label(p.warning, "changed in another window");
         if ui
             .small_button("Load saved version")
             .on_hover_text("Replace this window's arrangement with the saved one")
@@ -2302,27 +2505,48 @@ fn layout_status(ui: &mut egui::Ui, entry: &LayoutEntry, actions: &mut Vec<Actio
     }
 }
 
-/// The canvas behind the cards: darker than the cards in both themes (the
-/// light theme's own background is as pale as a card).
+/// The canvas behind the cards: a step darker than the cards in both themes.
 fn canvas_fill(visuals: &egui::Visuals) -> egui::Color32 {
-    if visuals.dark_mode {
-        visuals.extreme_bg_color
-    } else {
-        egui::Color32::from_gray(214)
+    Palette::of(visuals).canvas
+}
+
+/// A dot grid that moves with the view, so panning reads as movement.
+fn dot_grid(ui: &egui::Ui, area: egui::Rect, view: egui::Pos2) {
+    const STEP: f32 = 24.0;
+    let color = Palette::of(ui.visuals()).grid;
+    let painter = ui.painter_at(area);
+    let start = |min: f32, offset: f32| min - offset.rem_euclid(STEP) + STEP / 2.0;
+    let mut y = start(area.min.y, view.y);
+    while y < area.max.y {
+        let mut x = start(area.min.x, view.x);
+        while x < area.max.x {
+            painter.circle_filled(egui::pos2(x, y), 1.2, color);
+            x += STEP;
+        }
+        y += STEP;
     }
 }
 
 fn placeholder(ui: &mut egui::Ui, target: &Target) {
+    let p = Palette::of(ui.visuals());
+    ui.add_space(8.0);
+    ui.label(theme::glyph(icon::WARNING_CIRCLE).size(22.0).color(p.faint));
     ui.heading(match target {
         Target::Feed(name) => format!("Feed “{name}” no longer exists"),
         Target::Board(id) => format!("Board {id} no longer exists"),
         Target::Archive => "The archive is unavailable".into(),
     });
     ui.label(
-        "This card keeps its place in the layout. Use Show… in its title bar to point it at another feed or board, or close it.",
+        egui::RichText::new(
+            "This card keeps its place in the layout. Use the swap button in its title bar to point it at another feed or board, or close it.",
+        )
+        .color(p.muted),
     );
     if let Target::Feed(_) = target {
-        ui.weak("A new submission under the same name will appear here.");
+        ui.label(
+            egui::RichText::new("A new submission under the same name will appear here.")
+                .color(p.faint),
+        );
     }
 }
 
@@ -2460,7 +2684,14 @@ mod tests {
                 signals: ends.signals,
                 saves: ends.saves,
                 saved: ends.saved,
-                ctx: egui::Context::default(),
+                ctx: {
+                    // As the real app does before its first frame.
+                    let ctx = egui::Context::default();
+                    theme::install(&ctx);
+                    let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+                    output.textures_delta.clear();
+                    ctx
+                },
             }
         }
 
@@ -2604,7 +2835,12 @@ mod tests {
         app.apply(Action::Show(Target::Board(2)));
         // Pending changes in an inactive layout must also be flushed.
         app.apply(Action::Switch(LayoutKey::Unsaved));
+        // As the real app does before its first frame.
         let ctx = egui::Context::default();
+        theme::install(&ctx);
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
         let mut input = egui::RawInput::default();
         input
             .viewports
