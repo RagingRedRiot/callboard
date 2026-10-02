@@ -463,10 +463,13 @@ cascades off any card whose title bar it would cover.
 A Cargo workspace:
 
 - `callboard-core` — model, store, validation, API types.
-- `callboard` — one binary for the service (`callboard serve`), the CLI, and the
-  stdio MCP server (`callboard mcp`).
-- `callboard-gui` — the egui desktop app, kept separate so the CLI and service do
-  not link graphics dependencies.
+- `callboard-service` — the service runtime as a library: socket and lifecycle,
+  routes, client, setup, upgrade, and uninstall.
+- `callboard` — the one package users install, with both binaries: `callboard`
+  for the service (`callboard serve`), the CLI, and the stdio MCP server
+  (`callboard mcp`), and `callboard-gui`, the egui desktop app. Installing them
+  together means the app always finds a service from the same build. The
+  `callboard` binary never uses the GUI library, so it links no graphics code.
 
 ### 7.1 IPC
 
@@ -558,7 +561,7 @@ upgrade, and the status bar says to run `callboard upgrade` and reopen the GUI.
 
 1. It lists what it will remove: the generated systemd unit, the running service
    (by PID), the data directory with its size and feed and board counts, the
-   socket, and with `--purge` the config directory. It also lists open GUI
+   socket, the launcher entry, and with `--purge` the config directory. It also lists open GUI
    processes, which would auto-start a fresh, empty service. It removes nothing
    without interactive confirmation or `--yes`.
 2. It disables and stops the unit (`systemctl --user disable --now`), deletes the
@@ -577,6 +580,9 @@ upgrade, and the status bar says to run `callboard upgrade` and reopen the GUI.
    `--purge`. Recursive deletes apply only to real directories named
    `callboard`, so an unusual XDG value can make uninstall refuse but cannot widen
    what it deletes. It never auto-starts the service.
+6. It deletes the launcher entry that `callboard-gui --install-desktop` wrote
+   (`callboard.desktop` and its hicolor icons). An entry without the generated
+   marker is someone else's and stays.
 
 The binaries belong to Cargo; uninstall names them and leaves them in place.
 
@@ -672,7 +678,7 @@ A change summary:
  "added_keys": ["..."], "removed_keys": [], "updated_keys": ["...", "..."]}
 ```
 
-Feature routes live in `crates/callboard/src/routes/`, one file per area,
+Feature routes live in `crates/callboard-service/src/routes/`, one file per area,
 registered by `build.rs`. The dispatcher matches captures (`{feed}` is a valid
 feed name, `{id}` an integer, `{key}` and `{name}` decoded once), applies body
 limits, and refuses to start if two routes, or a route and a service endpoint

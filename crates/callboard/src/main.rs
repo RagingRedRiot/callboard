@@ -1,13 +1,13 @@
 mod board_cli;
 mod view_cli;
 
-use callboard::{
+use callboard_core::feed::{
+    ChangeSummary, MAX_SNAPSHOT_BYTES, parse_submission, validate_feed_name,
+};
+use callboard_service::{
     Error, client,
     lifecycle::{Environment, Paths},
     server, setup, uninstall, upgrade,
-};
-use callboard_core::feed::{
-    ChangeSummary, MAX_SNAPSHOT_BYTES, parse_submission, validate_feed_name,
 };
 use clap::{Parser, Subcommand};
 use std::{

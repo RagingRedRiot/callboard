@@ -1,10 +1,10 @@
 //! Service access. Never opens SQLite; auto-start uses the shared client
 //! lifecycle, so at most one detached service runs per data directory.
-use callboard::{client, lifecycle::Paths};
 use callboard_core::{
     layout::{NamedLayout, Preferences},
     store::{BoardContents, BoardSummary, Feed, FeedSummary},
 };
+use callboard_service::{client, lifecycle::Paths};
 use serde::de::DeserializeOwned;
 use std::{
     collections::BTreeSet,

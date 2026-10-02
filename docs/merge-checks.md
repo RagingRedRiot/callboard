@@ -75,11 +75,11 @@ Protected paths:
 - Controls and build: `.github/`, `.cargo/`, `scripts/`, `.gitignore`, every
   `Cargo.toml`, `Cargo.lock`, and `build.rs`, and toolchain files. Dependencies
   and build-time code are supply chain.
-- Service runtime: everything under `crates/callboard/src/` (socket
+- Service runtime: everything under `crates/callboard-service/src/` (socket
   authentication, filesystem and lock safety, request limits, route dispatch,
   event streams, systemd setup, upgrade exec, uninstall deletion), including any
-  new module, except the CLI front end that only builds requests (`main.rs`,
-  `board_cli.rs`, `view_cli.rs`) and the append-only route files below.
+  new module, except the append-only route files below. The CLI and GUI front
+  ends in `crates/callboard/src/` only build requests and are not guarded.
 - Core integrity: feed validation and limits (`crates/callboard-core/src/feed.rs`),
   its tests (`crates/callboard-core/tests/feed.rs`, `audit.rs`), and schema
   migrations (`crates/callboard-core/migrations/`). Every migration needs review,
@@ -88,16 +88,17 @@ Protected paths:
 Append-only paths need review to change, delete, or rename a file, but not to
 add one:
 
-- `crates/callboard/src/routes/`: one file per feature area of the API. `build.rs`
+- `crates/callboard-service/src/routes/`: one file per feature area of the API. `build.rs`
   registers every file there, and the guarded dispatcher (`api.rs`) refuses to
   start if a route overlaps another route or a service endpoint, so a new route
   file cannot alter an existing route. Route files may not use unsafe code.
-- `crates/callboard/tests/`: the service tests, including the API contract in
-  `routes.rs`, which pins every existing route's method, path, status, and
-  response fields. Changing an existing route's behavior, wherever the change
-  is made, breaks that test, and editing it needs review.
+- `crates/callboard/tests/`: the integration tests, kept beside the binaries
+  they run, including the API contract in `routes.rs`, which pins every
+  existing route's method, path, status, and response fields. Changing an
+  existing route's behavior, wherever the change is made, breaks that test, and
+  editing it needs review. The GUI's auto-start test lives here too.
 
-GUI code and tests, store queries, layouts, other core tests, and docs pass
+GUI code and its in-source tests, store queries, layouts, other core tests, and docs pass
 without review. Deletions and both sides of renames are covered, so moving code
 out of a protected file still needs review. Git errors fail closed. The
 definition appears in `scripts/checks.py` and in the base-only workflow;

@@ -48,11 +48,28 @@ ownership and Unix-socket access; restrictive sandboxes may deny these operation
 To run the desktop app from a checkout:
 
 ```sh
-cargo build -p callboard -p callboard-gui
+cargo build -p callboard
 target/debug/callboard-gui
 ```
 
 See [PROGRESS.md](../PROGRESS.md) for what each session built and what comes next.
+
+## Releasing
+
+Pushing a version tag publishes a GitHub release
+(`.github/workflows/release.yml`):
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The tag must equal `v` plus the version in `Cargo.toml` and point at a commit
+on `main`. The workflow builds a static `callboard` (musl), runs the
+cross-user security fixture against that exact binary, builds `callboard-gui`
+on Ubuntu 22.04 (glibc 2.35), checks that both carry the tagged commit's
+build ID, and attaches `callboard-x86_64-linux.tar.gz` and its SHA-256
+checksum to the release. It never replaces an existing release. Bump the
+workspace version in `Cargo.toml` before tagging a new release.
 
 ## The README demo
 

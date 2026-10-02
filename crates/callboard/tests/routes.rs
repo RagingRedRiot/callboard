@@ -4,7 +4,7 @@
 //! route's path, method, status, or response fields fails this test, and
 //! fixing it means editing a reviewed file. New routes are free to add: the
 //! table may grow, and new route files bring their own tests.
-use callboard::{
+use callboard_service::{
     client,
     lifecycle::{Environment, Paths},
     server,
@@ -50,7 +50,10 @@ const FROZEN: &[(&str, &str)] = &[
 
 #[test]
 fn every_frozen_route_is_still_registered() {
-    let table: BTreeSet<_> = callboard::api::list().unwrap().into_iter().collect();
+    let table: BTreeSet<_> = callboard_service::api::list()
+        .unwrap()
+        .into_iter()
+        .collect();
     for route in FROZEN {
         assert!(
             table.contains(route),

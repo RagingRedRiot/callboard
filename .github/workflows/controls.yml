@@ -31,16 +31,15 @@ jobs:
           import subprocess
 
           # The gate guards security and core stability, not ordinary feature work.
-          # Service runtime is protected by default (new modules included) except the
-          # CLI front end, which only builds requests. Route files and service tests are
-          # append-only: adding one needs no review, but changing, deleting, or renaming
-          # one does, so existing routes and their contract tests stay fixed. GUI code,
-          # store queries, layouts, and docs pass without review. Keep in sync with
-          # scripts/checks.py; scripts/tests/test_hosted_controls.py checks that the two agree.
+          # Service runtime is protected by default (new modules included); the CLI and
+          # GUI front ends in crates/callboard/src only build requests. Route files and
+          # service tests are append-only: adding one needs no review, but changing,
+          # deleting, or renaming one does, so existing routes and their contract tests
+          # stay fixed. GUI code, store queries, layouts, and docs pass without review.
+          # Keep in sync with scripts/checks.py; scripts/tests/test_hosted_controls.py checks that the two agree.
           CONTROL_PREFIXES = ('.github/', '.cargo/', 'scripts/')
-          APPEND_ONLY_PREFIXES = ('crates/callboard/src/routes/', 'crates/callboard/tests/')
-          GUARDED_PREFIXES = ('crates/callboard/src/', 'crates/callboard-core/migrations/')
-          CLI_FRONT_END = {'crates/callboard/src/main.rs', 'crates/callboard/src/board_cli.rs', 'crates/callboard/src/view_cli.rs'}
+          APPEND_ONLY_PREFIXES = ('crates/callboard-service/src/routes/', 'crates/callboard/tests/')
+          GUARDED_PREFIXES = ('crates/callboard-service/src/', 'crates/callboard-core/migrations/')
           BUILD_NAMES = {'Cargo.toml', 'Cargo.lock', 'build.rs', 'rust-toolchain', 'rust-toolchain.toml'}
           GUARDED_FILES = {
               '.gitignore',
@@ -55,7 +54,7 @@ jobs:
                   return status != 'added'
               return (
                   path.startswith(CONTROL_PREFIXES)
-                  or (path.startswith(GUARDED_PREFIXES) and path not in CLI_FRONT_END)
+                  or path.startswith(GUARDED_PREFIXES)
                   or PurePosixPath(path).name in BUILD_NAMES
                   or path in GUARDED_FILES
               )

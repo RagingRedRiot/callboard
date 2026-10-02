@@ -292,15 +292,18 @@ name = "callboard"
 version = "0.1.0"
 dependencies = [
  "callboard-core",
+ "callboard-service",
  "clap",
+ "eframe",
+ "egui_kittest",
  "http-body-util",
+ "humantime",
  "hyper",
  "hyper-util",
  "rustix 1.1.5",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.21",
  "tokio",
 ]
 
@@ -319,18 +322,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "callboard-gui"
+name = "callboard-service"
 version = "0.1.0"
 dependencies = [
- "callboard",
  "callboard-core",
- "eframe",
- "egui_kittest",
- "humantime",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "rustix 1.1.5",
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
 ]
 

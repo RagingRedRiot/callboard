@@ -10,11 +10,11 @@ use crate::{
     theme::{self, Palette, icon},
     workspace::{self, CardState, LayoutEntry, LayoutKey, Layouts, TITLE_HEIGHT},
 };
-use callboard::lifecycle::Paths;
 use callboard_core::{
     layout::{Layout, NamedLayout},
     store::{BoardInfo, BoardSummary, Feed, FeedInfo, FeedSummary},
 };
+use callboard_service::lifecycle::Paths;
 use eframe::egui;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1497,7 +1497,7 @@ impl App {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                 ui.painter().circle_filled(rect.center(), 3.5, dot);
                 if let Some(build) = self.service_build.as_deref()
-                    && build != callboard::BUILD
+                    && build != callboard_service::BUILD
                 {
                     theme::pill(ui, "Version mismatch", p.warning_soft, p.warning)
                         .on_hover_text(build_mismatch(build));
@@ -1950,6 +1950,9 @@ impl App {
     /// One line under the layout bar, so an outage does not shift the canvas
     /// around; details and setup hints are on hover.
     fn error_bar(&self, ui: &mut egui::Ui, error: &str) {
+        // A missing service binary will not fix itself, so say so up front
+        // rather than showing the socket error it causes.
+        let missing = !self.auto_start_disabled && self.auto_start.is_none();
         let hint = if self.auto_start_disabled {
             "No service is running and auto-start is disabled. Start `callboard serve` or restart the GUI without `--no-auto-start`."
         } else if self.auto_start.is_none() {
@@ -1961,7 +1964,11 @@ impl App {
             let p = Palette::of(ui.visuals());
             ui.label(theme::glyph(icon::WARNING_CIRCLE).color(p.danger));
             ui.colored_label(p.danger, "Unable to refresh:");
-            let first_line = error.lines().next().unwrap_or_default();
+            let first_line = if missing {
+                "the callboard service binary is not installed beside callboard-gui or on PATH"
+            } else {
+                error.lines().next().unwrap_or_default()
+            };
             ui.add(egui::Label::new(first_line).truncate())
                 .on_hover_text(format!("{error}\n\n{hint}"));
             if self.cache.lists_loaded() {
@@ -2428,6 +2435,12 @@ pub(crate) struct TestEnds {
 
 #[cfg(test)]
 impl App {
+    /// As if launched without `--no-auto-start` and with no service binary found.
+    pub(crate) fn without_service_binary(mut self) -> Self {
+        (self.auto_start, self.auto_start_disabled) = (None, false);
+        self
+    }
+
     pub(crate) fn for_tests() -> (Self, TestEnds) {
         let (requests, incoming) = mpsc::sync_channel(1);
         let (outgoing, responses) = mpsc::sync_channel(1);
@@ -2576,7 +2589,7 @@ pub(crate) fn build_mismatch(service: &str) -> String {
     format!(
         "The service is build {service}; this window is build {}. One of them is out of date. \
          After installing an update, run `callboard upgrade` and reopen this window.",
-        callboard::BUILD
+        callboard_service::BUILD
     )
 }
 

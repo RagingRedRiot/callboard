@@ -2113,7 +2113,9 @@ fn a_service_of_another_build_shows_a_version_mismatch() {
         .unwrap();
     ui.ends
         .signals
-        .send(crate::events::Signal::Build(callboard::BUILD.into()))
+        .send(crate::events::Signal::Build(
+            callboard_service::BUILD.into(),
+        ))
         .unwrap();
     ui.settle();
     assert!(ui.harness.query_by_label("Version mismatch").is_none());
@@ -2124,4 +2126,34 @@ fn a_service_of_another_build_shows_a_version_mismatch() {
     ui.settle();
     ui.harness.get_by_label("Version mismatch");
     assert!(crate::app::build_mismatch("0123456789ab").contains("callboard upgrade"));
+}
+
+#[test]
+fn a_missing_service_binary_is_named_instead_of_the_socket_error() {
+    let (app, ends) = App::for_tests();
+    let mut harness = Harness::builder()
+        .with_size([1200.0, 760.0])
+        .build_ui_state(
+            |ui, app: &mut App| app.show(ui),
+            app.without_service_binary(),
+        );
+    let unreachable = "/run/user/1000/callboard.sock: No such file or directory (os error 2)";
+    for _ in 0..8 {
+        harness.step();
+        if let Ok(request) = ends.requests.try_recv() {
+            let lists = request
+                .lists
+                .into_iter()
+                .map(|list| (list, Err(unreachable.to_owned())))
+                .collect();
+            ends.responses
+                .send(Fetched {
+                    lists,
+                    targets: vec![],
+                })
+                .unwrap();
+        }
+    }
+    harness.get_by_label_contains("service binary is not installed");
+    assert!(harness.query_by_label_contains("No such file").is_none());
 }

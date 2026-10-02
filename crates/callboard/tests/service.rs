@@ -1,5 +1,5 @@
 #![cfg(target_os = "linux")]
-use callboard::{
+use callboard_service::{
     client,
     lifecycle::{Environment, Paths},
     server,

@@ -1,11 +1,11 @@
 //! CLI access to feed view state, promotion, and saved layouts.
 use crate::board_cli::{Request, board_id};
-use callboard::{Error, lifecycle::Paths};
 use callboard_core::{
     feed::validate_feed_name,
     layout::{Layout, MAX_LAYOUT_BYTES, validate_name},
     store::FeedItemPatch,
 };
+use callboard_service::{Error, lifecycle::Paths};
 use clap::{Subcommand, ValueEnum};
 use std::{io::Read, path::Path};
 

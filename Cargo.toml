@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/callboard-core", "crates/callboard", "crates/callboard-gui"]
+members = ["crates/callboard-core", "crates/callboard-service", "crates/callboard"]
 resolver = "3"
 
 [workspace.package]
@@ -9,6 +9,7 @@ publish = false
 
 [workspace.dependencies]
 callboard-core = { path = "crates/callboard-core" }
+callboard-service = { path = "crates/callboard-service" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 humantime = "2"
