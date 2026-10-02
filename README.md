@@ -15,8 +15,8 @@ Scripts post what they find. callboard tracks what's new, and keeps it on a canv
 </div>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/canvas-dark.png">
-  <img alt="The callboard desktop app: feed cards for review requests, nightly builds, and upstream releases beside two boards of todos and notes" src="docs/assets/canvas-light.png">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/demo-dark.gif">
+  <img alt="A script runs callboard put and a new pull request appears live in the review feed; its details show on hover, it is dragged onto the Inbox board as a todo, a todo is ticked, a nightly build turns green, and Ctrl+K jumps back to the Inbox after panning away" src="docs/assets/demo-light.gif" width="100%">
 </picture>
 
 Anything a script can fetch can be a feed: pull requests waiting on you, last

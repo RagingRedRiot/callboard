@@ -1,5 +1,10 @@
 # Desktop app
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/canvas-dark.png">
+  <img alt="The callboard desktop app: feed cards for review requests, nightly builds, and upstream releases beside two boards of todos and notes" src="assets/canvas-light.png">
+</picture>
+
 ## Starting
 
 The desktop app lists feeds and boards and displays their

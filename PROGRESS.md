@@ -1001,6 +1001,23 @@ themes.
 - README screenshots re-rendered. Tests updated for the new accessible names
   and the layout menu; a placement test added.
 
+## Demo GIF
+
+- Recorded the README demo as cued's VHS tape does for the terminal, but for
+  the GUI: the real app in egui_kittest with the wgpu renderer against an
+  in-process service, scripted pointer, drag, key, and text events, a drawn
+  pointer and terminal strip, and ffmpeg. The story: `callboard put` adds a PR
+  live, its details on hover, a drag onto the Inbox promotes it, a todo is
+  ticked, a nightly build turns green, the canvas pans away and Ctrl+K jumps
+  back.
+- GIF size: the render's transparent margin made ffmpeg store every frame
+  whole (27 MB); cropping it and dropping alpha lets unchanged frames cost
+  nothing (about 1.3 MB per theme at 1184x704, 15 fps).
+- The README hero is now the GIF (light and dark); the static screenshot
+  moved to the top of `docs/gui.md`.
+- The recorder is not in this repository: it is becoming a standalone tool
+  for scripted demos of any project.
+
 ## Suggested next
 
 Polish from real use with a real tracking script (a GitHub query feed).
