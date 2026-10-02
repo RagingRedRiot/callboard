@@ -921,15 +921,25 @@ async fn layout_api_saves_replaces_and_rejects_invalid_requests_atomically() {
     );
     assert_eq!(f.api("POST", "/layouts", json!({})).await.0, 405);
     assert_eq!(f.api("PUT", "/layouts/a/b", json!({})).await.0, 404);
-    assert_eq!(
-        f.api(
-            "PUT",
-            path,
-            json!({"view":{"x":0,"y":0},"cards":[card(json!({"kind":"feed","name":"x".repeat(65536)}))]})
+    // One byte over the 64 KiB layout limit, declared but not transmitted:
+    // the service answers 413 without reading a body, so sending one would
+    // race its close and could fail with a broken pipe.
+    let mut socket = tokio::net::UnixStream::connect(f.paths.socket())
+        .await
+        .unwrap();
+    socket
+        .write_all(
+            format!("PUT {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 65537\r\n\r\n")
+                .as_bytes(),
         )
         .await
-        .0,
-        413
+        .unwrap();
+    let mut reply = Vec::new();
+    socket.read_to_end(&mut reply).await.unwrap();
+    assert!(String::from_utf8_lossy(&reply).starts_with("HTTP/1.1 413"));
+    assert_eq!(
+        f.api("GET", "/layouts", json!(null)).await.1,
+        json!([saved])
     );
     let (status, replaced) = f
         .api("PUT", path, json!({"view":{"x":0,"y":0},"cards":[]}))
