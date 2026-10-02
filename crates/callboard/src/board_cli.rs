@@ -1,9 +1,9 @@
 //! Board and item command planning. All mutations go through the service API.
-use callboard::{Error, client, lifecycle::Paths};
 use callboard_core::{
     feed::{MAX_BODY_BYTES, MAX_TITLE_CHARS},
     store::{BoardInfo, NotePatch, TodoPatch},
 };
+use callboard_service::{Error, client, lifecycle::Paths};
 use clap::Subcommand;
 use serde_json::{Value, json};
 use std::{io::Read, path::Path};

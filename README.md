@@ -41,15 +41,38 @@ and save.
 
 ## Quick start
 
-Requires Linux and Rust 1.98 or newer; the desktop app also needs Wayland or X11
-with OpenGL.
+Download the latest release for x86_64 Linux:
+
+```sh
+base=https://github.com/RagingRedRiot/callboard/releases/latest/download
+curl -fLO "$base/callboard-x86_64-linux.tar.gz" -O "$base/callboard-x86_64-linux.tar.gz.sha256"
+sha256sum -c callboard-x86_64-linux.tar.gz.sha256
+tar -xzf callboard-x86_64-linux.tar.gz callboard callboard-gui
+install -D -m 755 -t ~/.local/bin callboard callboard-gui
+callboard-gui --install-desktop   # add Callboard to your applications list and dock
+```
+
+The archive holds both binaries from one build: `callboard` (the service and
+CLI) and `callboard-gui` (the desktop app), which starts the service from
+beside it. `callboard` is static and runs on any x86_64 Linux; the app needs a
+Wayland or X11 desktop with OpenGL and glibc 2.35 or newer.
+
+Or build from source with Rust 1.98 or newer:
 
 ```sh
 git clone https://github.com/RagingRedRiot/callboard.git
 cd callboard
-cargo install --path crates/callboard --locked
-cargo install --path crates/callboard-gui --locked
+cargo install --path crates/callboard --locked   # installs callboard and callboard-gui to ~/.cargo/bin
+callboard-gui --install-desktop
 ```
+
+`--install-desktop` adds a launcher entry and icons under `~/.local/share`,
+which GNOME, KDE, COSMIC, and other freedesktop desktops read. The entry runs the
+app by its full path, so it works even when the folder you installed into isn't
+on your desktop session's `PATH`. Run it again if you move the binary. If the
+launcher or dock doesn't show it straight away, log out and back in.
+`callboard-gui --uninstall-desktop` removes it. See [Desktop app](docs/gui.md)
+for details.
 
 Post a feed and open the board:
 
@@ -96,11 +119,20 @@ its items.
 
 ## Upgrade and uninstall
 
+Install the new release over the old binaries (or `git pull && cargo install
+--path crates/callboard --locked` from source), then:
+
 ```sh
-git pull && cargo install --path crates/callboard --locked && cargo install --path crates/callboard-gui --locked
 callboard upgrade            # switch the running service to the new build
-callboard uninstall          # remove the service, unit, and all data (--purge for config too)
+callboard uninstall          # remove the service, unit, launcher, and all data (--purge for config too)
 ```
+
+Uninstall leaves the binaries: delete them from `~/.local/bin`, or run
+`cargo uninstall callboard` for a source install.
+
+Upgrading from a build where the app was a separate `callboard-gui` package?
+Run `cargo uninstall callboard-gui` once before installing; otherwise Cargo
+refuses to replace the old binary.
 
 ## Status
 

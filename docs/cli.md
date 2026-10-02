@@ -120,7 +120,6 @@ Install the new build over the old one, then move the running service onto it:
 
 ```sh
 cargo install --path crates/callboard --locked
-cargo install --path crates/callboard-gui --locked
 callboard upgrade
 ```
 
@@ -135,11 +134,12 @@ mismatch" while a window and the service are different builds.
 
 ```sh
 callboard uninstall          # add --purge to remove ~/.config/callboard too
-cargo uninstall callboard callboard-gui
+cargo uninstall callboard    # or delete the binaries, for a release install
 ```
 
 `uninstall` lists what it will remove and asks first: the systemd unit, the
 running service, and the data directory with every feed, board, todo, note,
-layout, and the archive, plus the socket. Config is kept unless you pass
+layout, and the archive, plus the socket and the launcher entry from
+`callboard-gui --install-desktop`. Config is kept unless you pass
 `--purge`. Close `callboard-gui` first; an open window would start a fresh,
 empty service. Off a terminal, `--yes` is required.

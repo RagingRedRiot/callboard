@@ -1,5 +1,5 @@
 //! An isolated in-process service for backend and event tests.
-use callboard::{
+use callboard_service::{
     client,
     lifecycle::{Environment, Paths},
     server,

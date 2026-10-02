@@ -1,11 +1,11 @@
 #![cfg(target_os = "linux")]
 use callboard::{
-    client,
-    lifecycle::{Environment, Paths},
-};
-use callboard_gui::{
     backend::{self, Contents, List, ListData, Request, Target},
     events::{self, Signal},
+};
+use callboard_service::{
+    client,
+    lifecycle::{Environment, Paths},
 };
 use std::{
     os::unix::{fs::PermissionsExt, net::UnixStream},

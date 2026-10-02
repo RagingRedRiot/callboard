@@ -1,7 +1,9 @@
 //! `callboard uninstall` (DESIGN.md §7.4): remove the systemd unit, stop the
-//! service, and delete its data and socket; config only with `--purge`.
+//! service, and delete its data, socket, and launcher entry; config only
+//! with `--purge`.
 use crate::{
     Error, client,
+    desktop::{self, Entry},
     lifecycle::{Paths, try_lock},
     setup::{self, Unit},
     upgrade,
@@ -56,6 +58,7 @@ pub async fn run(paths: &Paths, purge: bool, yes: bool) -> Result<(), Error> {
         None => (None, None),
     };
     let config = paths.config_dir();
+    let launcher = matches!(desktop::read_entry(paths)?, Entry::Generated);
     let guis = upgrade::guis();
 
     println!("This removes callboard from this account:");
@@ -78,6 +81,12 @@ pub async fn run(paths: &Paths, purge: bool, yes: bool) -> Result<(), Error> {
             "  - {} ({}): {contents}",
             paths.data_dir().display(),
             human_size(dir_size(paths.data_dir()))
+        );
+    }
+    if launcher {
+        println!(
+            "  - the launcher entry {} and its icons",
+            desktop::entry_path(paths).display()
         );
     }
     if !paths.socket_dir().starts_with(paths.data_dir()) && paths.socket().exists() {
@@ -142,6 +151,9 @@ pub async fn run(paths: &Paths, purge: bool, yes: bool) -> Result<(), Error> {
         println!("removed {}", paths.data_dir().display());
     }
     drop(lock);
+    if let Some(removed) = desktop::remove(paths)? {
+        println!("removed {} and its icons", removed.display());
+    }
     if purge && remove_owned_dir(config)? {
         println!("removed {}", config.display());
     }
@@ -153,9 +165,17 @@ pub async fn run(paths: &Paths, purge: bool, yes: bool) -> Result<(), Error> {
         if gui.exists() {
             binaries.push_str(&format!(" and {}", gui.display()));
         }
-        println!(
-            "The binaries remain at {binaries}; `cargo uninstall callboard callboard-gui` removes them."
-        );
+        // A release archive's binaries are the user's to delete; Cargo
+        // tracks only what `cargo install` put in its bin directory.
+        let remove = if binary
+            .parent()
+            .is_some_and(|dir| dir.ends_with(".cargo/bin"))
+        {
+            "`cargo uninstall callboard` removes them"
+        } else {
+            "delete them to finish"
+        };
+        println!("The binaries remain at {binaries}; {remove}.");
     }
     println!("Running any callboard command starts afresh with an empty store.");
     Ok(())

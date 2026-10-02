@@ -17,15 +17,15 @@ spec.loader.exec_module(checks)
 
 GUARDED = [
     '.github/workflows/ci.yml', '.cargo/config.toml', 'scripts/security/run.sh', '.gitignore',
-    'Cargo.toml', 'Cargo.lock', 'crates/callboard-gui/Cargo.toml', 'crates/callboard/build.rs',
-    'rust-toolchain.toml', 'crates/callboard/src/lifecycle.rs', 'crates/callboard/src/server.rs',
-    'crates/callboard/src/upgrade.rs', 'crates/callboard/src/new_module.rs',
+    'Cargo.toml', 'Cargo.lock', 'crates/callboard/Cargo.toml', 'crates/callboard-service/build.rs',
+    'rust-toolchain.toml', 'crates/callboard-service/src/lifecycle.rs', 'crates/callboard-service/src/server.rs',
+    'crates/callboard-service/src/upgrade.rs', 'crates/callboard-service/src/new_module.rs',
     'crates/callboard-core/src/feed.rs', 'crates/callboard-core/tests/feed.rs',
     'crates/callboard-core/tests/audit.rs', 'crates/callboard-core/migrations/0010_new.sql',
 ]
 UNGUARDED = [
-    'README.md', 'DESIGN.md', 'docs/merge-checks.md', 'crates/callboard-gui/src/app.rs',
-    'crates/callboard-gui/src/feed.rs', 'crates/callboard-gui/tests/autostart.rs',
+    'README.md', 'DESIGN.md', 'docs/merge-checks.md', 'crates/callboard/src/app.rs',
+    'crates/callboard/src/feed.rs', 'crates/callboard/src/bin/callboard-gui.rs',
     'crates/callboard/src/main.rs', 'crates/callboard/src/board_cli.rs',
     'crates/callboard/src/view_cli.rs', 'crates/callboard-core/src/store.rs',
     'crates/callboard-core/src/layout.rs', 'crates/callboard-core/tests/colors.rs',
@@ -33,9 +33,9 @@ UNGUARDED = [
 ]
 
 
-APPEND_ONLY = ['crates/callboard/src/routes/feeds.rs', 'crates/callboard/src/routes/new_feature.rs',
+APPEND_ONLY = ['crates/callboard-service/src/routes/feeds.rs', 'crates/callboard-service/src/routes/new_feature.rs',
                'crates/callboard/tests/routes.rs', 'crates/callboard/tests/service.rs',
-               'crates/callboard/tests/new.rs']
+               'crates/callboard/tests/autostart.rs', 'crates/callboard/tests/new.rs']
 CHANGES = ('modified', 'removed', 'renamed', 'copied', 'changed')
 
 
@@ -64,18 +64,18 @@ class Scope(unittest.TestCase):
     def test_renaming_an_existing_route_away_is_guarded(self):
         self.pr['changed_files'] = 1
         event = {'action': 'synchronize', 'pull_request': copy.deepcopy(self.pr)}
-        files = [{'filename': 'crates/callboard/src/routes/elsewhere.rs', 'status': 'renamed',
-                  'previous_filename': 'crates/callboard/src/routes/feeds.rs'}]
+        files = [{'filename': 'crates/callboard-service/src/routes/elsewhere.rs', 'status': 'renamed',
+                  'previous_filename': 'crates/callboard-service/src/routes/feeds.rs'}]
         with self.assertRaises(RuntimeError):
             policy['evaluate'](event, self.pr, files, None, '1')
-        files = [{'filename': 'crates/callboard/src/routes/new_feature.rs', 'status': 'added'}]
+        files = [{'filename': 'crates/callboard-service/src/routes/new_feature.rs', 'status': 'added'}]
         self.assertEqual(policy['evaluate'](event, self.pr, files, None, '1'), [])
 
     def setUp(self):
         self.pr = {'head': {'sha': 'h'}, 'base': {'sha': 'b'}, 'changed_files': 1, 'labels': []}
 
     def test_both_copies_define_the_same_scope(self):
-        for name in ('CONTROL_PREFIXES', 'APPEND_ONLY_PREFIXES', 'GUARDED_PREFIXES', 'CLI_FRONT_END',
+        for name in ('CONTROL_PREFIXES', 'APPEND_ONLY_PREFIXES', 'GUARDED_PREFIXES',
                      'BUILD_NAMES', 'GUARDED_FILES'):
             self.assertEqual(policy[name], getattr(checks, name), name)
 

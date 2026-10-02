@@ -5,7 +5,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
-use callboard::lifecycle::{Environment, LifecycleError, Paths, ServiceGuard};
+use callboard_service::lifecycle::{Environment, LifecycleError, Paths, ServiceGuard};
 
 fn private_tempdir() -> tempfile::TempDir {
     tempfile::Builder::new()

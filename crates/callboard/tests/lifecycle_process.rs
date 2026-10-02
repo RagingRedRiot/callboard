@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 // Keep subprocess creation separate from parallel socket/lock lifetime tests:
 // fork can temporarily retain their descriptors until the child reaches exec.
-use callboard::lifecycle::{Environment, LifecycleError, Paths, ServiceGuard};
+use callboard_service::lifecycle::{Environment, LifecycleError, Paths, ServiceGuard};
 use std::fs::Permissions;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;

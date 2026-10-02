@@ -15,9 +15,19 @@ the service running if the window closes. It locates the service executable as
 specific executable path to override lookup. For example, during development:
 
 ```sh
-cargo build -p callboard -p callboard-gui
+cargo build -p callboard
 target/debug/callboard-gui
 ```
+
+`callboard-gui --install-desktop` adds Callboard to your desktop's applications
+list, with its icon in the dock. It writes `callboard.desktop` to
+`$XDG_DATA_HOME/applications` (default `~/.local/share`) and icons to
+`$XDG_DATA_HOME/icons/hicolor`, which GNOME, KDE, COSMIC, and other freedesktop
+desktops read. The entry launches the binary by absolute path, so rerun it
+after moving the binary; `cargo install` over the same path needs no rerun. An
+existing `callboard.desktop` that it didn't write is left alone.
+`callboard-gui --uninstall-desktop` removes the entry and icons, and so does
+`callboard uninstall`.
 
 `callboard-gui --no-auto-start` requires an existing service. Both processes
 must use the same XDG and CALLBOARD_SOCKET_DIR settings. Auto-start uses the
@@ -102,6 +112,6 @@ anywhere else on the card a todo (Escape cancels).
 
 ## Requirements
 
-Graphics dependencies are confined to the GUI
-crate; building `callboard` alone does not build eframe. A Wayland or X11 desktop
+The `callboard` binary links no graphics code, though building the package
+compiles eframe for `callboard-gui`. A Wayland or X11 desktop
 with OpenGL support is required to launch the window.

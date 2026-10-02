@@ -2,7 +2,7 @@
 //! `callboard upgrade` and `callboard uninstall` against real processes
 //! (DESIGN.md §7.4), each in an isolated deployment with its own copy of the
 //! binary so it can be replaced.
-use callboard::{
+use callboard_service::{
     client,
     lifecycle::{Environment, Paths},
 };
@@ -150,8 +150,8 @@ async fn upgrade_replaces_the_image_in_place_without_dropping_requests() {
     let mut service = deployment.serve().await;
     let pid = service.id().unwrap() as i32;
     let health = deployment.health().await.unwrap();
-    assert_eq!(health["version"], callboard::VERSION);
-    assert_eq!(health["build"], callboard::BUILD);
+    assert_eq!(health["version"], callboard_service::VERSION);
+    assert_eq!(health["build"], callboard_service::BUILD);
     deployment
         .api("POST", "/boards", r#"{"name":"Inbox"}"#)
         .await;
