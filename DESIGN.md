@@ -269,7 +269,8 @@ narrow board, a stack of small status cards in a corner.
 - **Scroll** within a card: contents never grow a card, so a feed of hundreds of
   items stays the size the user gave it and scrolls inside.
 - **Close** removes the card from the layout; the feed or board is unaffected.
-- **Show…** in the title bar points the card at a different feed or board.
+- **Show…** (the swap button in the title bar) points the card at a different
+  feed or board.
 
 A layout holds at most one card per feed or board. Targets already on the
 canvas are shown but disabled in **Show…**.
@@ -343,8 +344,8 @@ to the service at once; the card refetches and shows what was stored.
   confirmation) from the same menu.
 - **Show archived (n)** lists the board's archived items with **Restore** and
   **Delete…**.
-- The **Board** menu renames the board, sets its **Color** (tinting the
-  card's title bar and marking its sidebar entry with a swatch), archives
+- The **Board** menu renames the board, sets its **Color** (a band along the
+  card's top edge and a dot on its sidebar entry), archives
   done todos, or deletes the board. The confirmation says that its todos and notes, archived ones
   included, move to the deleted-board archive. Deleting a board from the GUI
   closes its card in the active layout.
@@ -445,6 +446,17 @@ layout bar; the GUI maps canvas coordinates to the screen with the view offset.
 egui supplies the pieces — child areas, scroll areas, and drag sensing — and
 the GUI owns card geometry and stacking order, which are exactly what a layout
 stores.
+
+The look is one set of design tokens (`callboard-gui/src/theme.rs`) applied to
+egui's style for both themes: slate neutrals and a single teal accent taken
+from the app icon, a ladder of surface tones with hairline borders and a soft
+card shadow, radii of 4, 6, and 10 points, and an 8-point spacing rhythm. Text is
+Inter (regular, medium, semibold) and icons are Phosphor, both bundled in the
+binary with their licenses. Icons have a font family of their own, never a
+fallback for text. Buttons are ghosts until hovered; icon buttons carry
+accessible names. Item colors are a bar at a row's edge, not a filled row;
+notes keep a tint blended from the same color. A card placed by the GUI
+cascades off any card whose title bar it would cover.
 
 ## 7. Components
 

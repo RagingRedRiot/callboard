@@ -974,6 +974,33 @@ themes.
   change so this PR needs no control review), the app icon and social preview
   (being designed separately), and a window icon in the GUI once the icon exists.
 
+## Visual redesign
+
+- Researched modern UI patterns (brand design analyses in
+  VoltAgent/awesome-design-md, Rerun's egui `re_ui` tokens, a Refactoring UI
+  diagnosis checklist, Plane and Planka cards) and applied them.
+- `theme.rs`: palette (slate neutrals, the icon's teal as the one accent),
+  radii, spacing, type scale, ghost buttons, shadows; Inter and Phosphor
+  bundled (`assets/fonts`, OFL and MIT). Icons use their own font family:
+  Inter has glyphs in Phosphor's private-use range, and Phosphor blanks a-z.
+  Fonts switch at the start of the next frame, so `App::new` installs the
+  theme before the first one; a frame that installs it draws nothing.
+- Top bar: a layout menu (switch, save as, new, rename, delete, show all), a
+  "Search or jump to…" field for quick open, and a live dot. Sidebar: section
+  labels, icon rows with muted counts, a "new" pill, an error mark.
+- Cards: surface with hairline and shadow, accent ring on the front card,
+  board color as a top band, icon buttons (swap, collapse, close) with
+  accessible names. Feed rows: color as an edge bar, quiet links, pills for
+  new/updated, one truncating meta line (it used to widen the card body).
+  Board rows: no outlines, a drawn checkbox, section labels; empty toggles
+  ("Show snoozed (0)") are hidden. Quick open is a command palette. Empty and
+  error states have icons. Hover fades.
+- Fixed: a card placed near another could cover its title bar (cascade only
+  applied within 16 points of a corner); it now cascades off any covered
+  title bar.
+- README screenshots re-rendered. Tests updated for the new accessible names
+  and the layout menu; a placement test added.
+
 ## Suggested next
 
 Polish from real use with a real tracking script (a GitHub query feed).

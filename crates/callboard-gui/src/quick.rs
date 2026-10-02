@@ -1,6 +1,11 @@
 //! Quick open (Ctrl+K): find a feed, board, or layout by name and open it
 //! (DESIGN.md §6.1).
-use crate::{app::Action, backend::Target, workspace::LayoutKey};
+use crate::{
+    app::Action,
+    backend::Target,
+    theme::{self, Palette, icon},
+    workspace::LayoutKey,
+};
 use eframe::egui;
 
 pub const SHORTCUT: egui::KeyboardShortcut =
@@ -134,14 +139,24 @@ pub fn show(
         .title_bar(false)
         .collapsible(false)
         .resizable(false)
-        .fixed_size(egui::vec2(420.0, 0.0))
-        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
+        .fixed_size(egui::vec2(520.0, 0.0))
+        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 90.0))
         .show(ui.ctx(), |ui| {
-            let label = ui.label("Open a feed, board, or layout");
+            let p = Palette::of(ui.visuals());
+            let label = ui.label(theme::eyebrow(ui, "Open a feed, board, or layout"));
+            label.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Label,
+                    true,
+                    "Open a feed, board, or layout",
+                )
+            });
             let field = ui
                 .add(
                     egui::TextEdit::singleline(&mut state.text)
                         .hint_text("Type a name")
+                        .font(egui::FontId::proportional(15.0))
+                        .margin(egui::Margin::symmetric(10, 8))
                         .desired_width(f32::INFINITY),
                 )
                 .labelled_by(label.id);
@@ -149,27 +164,49 @@ pub fn show(
                 state.selected = 0;
             }
             field.request_focus();
+            ui.add_space(4.0);
             if found.is_empty() {
-                ui.weak("No matches");
+                ui.label(egui::RichText::new("No matches").color(p.faint));
             }
-            // Full-width entries with their text at the left.
-            ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
-                for (i, choice) in found.iter().enumerate() {
-                    let text = match choice.note {
-                        Some(note) => format!("{}: {} ({note})", choice.kind, choice.title),
-                        None => format!("{}: {}", choice.kind, choice.title),
-                    };
-                    let response = ui.selectable_label(i == state.selected, text);
-                    if response.clicked() {
-                        chosen = Some(i);
-                    }
-                    if i == state.selected && (up || down) {
-                        response.scroll_to_me(None);
-                    }
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for (i, choice) in found.iter().enumerate() {
+                let name = match choice.note {
+                    Some(note) => format!("{}: {} ({note})", choice.kind, choice.title),
+                    None => format!("{}: {}", choice.kind, choice.title),
+                };
+                let glyph = match choice.kind {
+                    "Feed" => icon::RSS_SIMPLE,
+                    "Board" => icon::KANBAN,
+                    "Archive" => icon::ARCHIVE,
+                    _ => icon::SQUARES_FOUR,
+                };
+                let response = theme::list_row(ui, i == state.selected, |ui| {
+                    ui.label(theme::glyph(glyph).color(p.muted));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let kind = match choice.note {
+                            Some(note) => format!("{} · {note}", choice.kind),
+                            None => choice.kind.to_string(),
+                        };
+                        theme::row_text(ui, egui::RichText::new(kind).size(12.0).color(p.faint));
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            theme::row_text(ui, &choice.title);
+                        });
+                    });
+                });
+                theme::name(&response, &name);
+                if response.clicked() {
+                    chosen = Some(i);
                 }
-            });
-            // Arrow glyphs are missing from egui's fonts.
-            ui.weak("Up/Down to select · Enter to open · Esc to close");
+                if i == state.selected && (up || down) {
+                    response.scroll_to_me(None);
+                }
+            }
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new("↑ ↓ to select  ·  ↵ to open  ·  Esc to close")
+                    .size(11.5)
+                    .color(p.faint),
+            );
         });
     if let Some(choice) = chosen.and_then(|i| found.get(i)) {
         actions.push(choice.action.clone());

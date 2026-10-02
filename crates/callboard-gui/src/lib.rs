@@ -8,6 +8,7 @@ pub mod quick;
 pub mod sync;
 #[cfg(test)]
 mod testing;
+pub mod theme;
 #[cfg(test)]
 mod ui_tests;
 pub mod workspace;

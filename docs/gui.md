@@ -23,21 +23,21 @@ same kernel UID checks, data lock, and process lifecycle as CLI requests.
 The window is a canvas of cards, one per feed or board (DESIGN.md §6.1).
 Cards overlap; clicking anywhere on a card brings it to the front. Drag a
 card's title bar to move it, drag its right or bottom edge or corner to resize
-it, **−** collapses it to its title bar (which keeps showing counts) and **+**
-expands it, and **×** removes it from the layout. **Show…** in the title bar
-points the card at another feed or board; targets that already have a card are
-disabled. A long feed scrolls inside its card.
+it. The buttons at the right of its title bar collapse it to the title bar
+(which keeps showing counts) and expand it again, and remove it from the
+layout. The swap button (**Show…**) points the card at another feed or board;
+targets that already have a card are disabled. A long feed scrolls inside its card.
 
 ## Navigating
 
 Drag empty canvas, or use the wheel over it (Shift + wheel for horizontal), to
-pan; over a card, the wheel scrolls that card. **Show all** in the layout bar
+pan; over a card, the wheel scrolls that card. **Show all** in the layout menu
 pans back to the cards. Clicking a sidebar entry pans to its card or places a
 new one in the middle of the view; **Add card…** offers the same, the
 right-click menu can also remove a card, and dragging an entry onto the canvas
 places its card at the drop point. The sidebar lists saved layouts, feeds with
 error/stale markers, and boards, each with its item count (visible and snoozed
-for feeds). **Ctrl+K** (or **Open…** in the layout bar) finds a feed,
+for feeds). **Ctrl+K** (or the **Search or jump to…** field in the top bar) finds a feed,
 board, or layout by name: type part of it, pick with Up/Down or the pointer,
 and press Enter to reveal or place the card, or to switch layouts. The GUI
 opens the layout that was active when it last ran, or else
@@ -57,10 +57,10 @@ open only when clicked; other URL schemes display as text.
 ## Layouts
 
 Arrangement changes save to the active layout automatically after a
-one-second pause (`PUT /layouts/{name}`); the layout bar shows saving, saved,
+one-second pause (`PUT /layouts/{name}`); the top bar shows saving, saved,
 or a failed save that is retried. Closing the window flushes pending named-layout
 changes and waits for confirmation; if saving fails, you can retry, keep the
-window open, or explicitly close without waiting. **Save as…** stores the current arrangement
+window open, or explicitly close without waiting. The layout menu (the layout's name at the top left) switches layouts, and **Save as…** stores the current arrangement
 under a new name and **New layout…** creates an empty one. **Rename…** and
 **Delete…** act on the active saved layout; deleting it switches to the next
 saved layout. Without any saved
@@ -77,8 +77,8 @@ feed's description and last change ("Changed 10m ago: 2 new · 1 gone"; hover
 for the gone titles). Its
 **…** menu has **Snooze** (for an hour, four hours, a day, a week, or until
 its content changes) and **Promote** (to a board as a todo or note). Snoozed
-items appear under **Show snoozed**, where the menu offers **Unsnooze**. A failed action shows a
-dismissible message under the layout bar.
+items appear under **Show snoozed (n)**, shown when something is snoozed, where the menu offers **Unsnooze**. A failed action shows a
+dismissible message under the top bar.
 
 ## Board cards
 
@@ -86,8 +86,8 @@ Board cards are editable (DESIGN.md §6.3). Type into **Add a todo** or **Add a
 note** and press Enter; tick a todo's checkbox to mark it done. Each item's
 **…** menu edits it in place (title, details, link, and color),
 moves it to another board, archives it, or deletes it after confirmation. Drag
-the dotted handle at an item's left to reorder it. **Show archived** lists
-archived items with **Restore**. The **Board** menu renames the board, sets its color (tinting its title bar),
+the dotted handle at an item's left to reorder it. **Show archived (n)**, shown when there are any, lists
+archived items with **Restore**. The **Board** menu renames the board, sets its color (a band along the card's top edge and a dot in the sidebar),
 archives its done todos, or deletes it (its items move to the deleted-board
 archive, whose card restores them to a chosen board). **New board…** in the
 sidebar creates a board and places its card. Drag a feed item by its dotted

@@ -2,6 +2,7 @@
 use crate::{
     app::{Action, DeleteSubject, PromptKind, WriteOp},
     backend::{PromoteKind, Target},
+    theme::{self, Palette, icon},
 };
 use callboard_core::store::{
     BoardContents, BoardItem, BoardSummary, Note, ResolvedReference, Todo,
@@ -230,31 +231,13 @@ fn note_fill(color: Option<&str>, visuals: &egui::Visuals) -> egui::Color32 {
         .unwrap_or(visuals.faint_bg_color)
 }
 
-/// A small mark of a named color that stands out against the theme's
-/// background: the other theme's shade.
-pub(crate) fn color_swatch(color: &str, visuals: &egui::Visuals) -> Option<egui::Color32> {
-    let mut other = visuals.clone();
-    other.dark_mode = !visuals.dark_mode;
-    color_fill(color, &other)
-}
-
-/// A named color's fill for notes and feed items (DESIGN.md §3.2): muted in
-/// the dark theme, pastel in the light one, so text reads on both. `None`
-/// for a name this version does not know.
+/// A named color's fill for notes (DESIGN.md §3.2): its mark blended into
+/// the card surface, so text reads in both themes and the tint matches the
+/// color bars. `None` for a name this version does not know.
 pub(crate) fn color_fill(color: &str, visuals: &egui::Visuals) -> Option<egui::Color32> {
-    let (dark, light) = match color {
-        "red" => ([88, 34, 34], [255, 210, 206]),
-        "orange" => ([86, 52, 24], [255, 224, 190]),
-        "yellow" => ([74, 66, 28], [255, 244, 179]),
-        "green" => ([34, 62, 40], [208, 238, 208]),
-        "blue" => ([30, 50, 78], [208, 226, 255]),
-        "purple" => ([54, 42, 80], [230, 216, 255]),
-        "pink" => ([78, 38, 56], [255, 216, 230]),
-        "gray" => ([58, 58, 62], [226, 226, 230]),
-        _ => return None,
-    };
-    let [r, g, b] = if visuals.dark_mode { dark } else { light };
-    Some(egui::Color32::from_rgb(r, g, b))
+    let p = Palette::of(visuals);
+    let strength = if visuals.dark_mode { 0.24 } else { 0.2 };
+    theme::color_mark(color).map(|mark| p.surface.lerp_to_gamma(mark, strength))
 }
 
 /// An item being edited in place, kept in egui's memory per card.
@@ -416,9 +399,10 @@ pub fn show(
         .filter(|t| card.done(&t.item))
         .map(|t| t.item.id)
         .collect();
+    let p = Palette::of(ui.visuals());
     ui.horizontal(|ui| {
         // Archived todos are neither open nor done.
-        ui.label(if card.archive() {
+        let summary = if card.archive() {
             format!(
                 "{} · {}",
                 count(items.todos.len(), "todo"),
@@ -430,52 +414,59 @@ pub fn show(
                 count(items.todos.len(), "todo"),
                 count(items.notes.len(), "note")
             )
-        });
+        };
+        ui.label(egui::RichText::new(summary).size(12.0).color(p.faint));
         if card.archive() {
             return;
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.menu_button("Board", |ui| {
-                if ui.button("Rename…").clicked() {
-                    actions.push(Action::Prompt(PromptKind::RenameBoard(card.board)));
-                    ui.close();
-                }
-                let current = items.board.as_ref().and_then(|b| b.color.clone());
-                ui.menu_button("Color", |ui| {
-                    let choices = std::iter::once((None, "None"))
-                        .chain(COLORS.iter().map(|(value, label)| (Some(*value), *label)));
-                    for (value, label) in choices {
-                        let chosen = current.as_deref() == value;
-                        if ui.add(egui::Button::selectable(chosen, label)).clicked() {
-                            if !chosen {
-                                actions.push(write(BoardOp::Recolor {
-                                    id: card.board,
-                                    color: value.map(str::to_owned),
-                                }));
-                            }
-                            ui.close();
-                        }
+            let menu = ui.menu_button(
+                theme::glyph(icon::DOTS_THREE).size(15.0).color(p.muted),
+                |ui| {
+                    if ui.button("Rename…").clicked() {
+                        actions.push(Action::Prompt(PromptKind::RenameBoard(card.board)));
+                        ui.close();
                     }
-                });
-                if ui
-                    .add_enabled(!done.is_empty(), egui::Button::new("Archive done"))
-                    .clicked()
-                {
-                    actions.push(write(BoardOp::ArchiveDone {
-                        board: card.board,
-                        ids: done.clone(),
-                    }));
-                    ui.close();
-                }
-                if ui.button("Delete board…").clicked() {
-                    let name = items.board.as_ref().map(|b| b.name.clone());
-                    actions.push(Action::ConfirmDelete(DeleteSubject::Board {
-                        id: card.board,
-                        name: name.unwrap_or_default(),
-                    }));
-                    ui.close();
-                }
-            });
+                    let current = items.board.as_ref().and_then(|b| b.color.clone());
+                    ui.menu_button("Color", |ui| {
+                        let choices = std::iter::once((None, "None"))
+                            .chain(COLORS.iter().map(|(value, label)| (Some(*value), *label)));
+                        for (value, label) in choices {
+                            let chosen = current.as_deref() == value;
+                            if ui.add(egui::Button::selectable(chosen, label)).clicked() {
+                                if !chosen {
+                                    actions.push(write(BoardOp::Recolor {
+                                        id: card.board,
+                                        color: value.map(str::to_owned),
+                                    }));
+                                }
+                                ui.close();
+                            }
+                        }
+                    });
+                    if ui
+                        .add_enabled(!done.is_empty(), egui::Button::new("Archive done"))
+                        .clicked()
+                    {
+                        actions.push(write(BoardOp::ArchiveDone {
+                            board: card.board,
+                            ids: done.clone(),
+                        }));
+                        ui.close();
+                    }
+                    if ui.button("Delete board…").clicked() {
+                        let name = items.board.as_ref().map(|b| b.name.clone());
+                        actions.push(Action::ConfirmDelete(DeleteSubject::Board {
+                            id: card.board,
+                            name: name.unwrap_or_default(),
+                        }));
+                        ui.close();
+                    }
+                },
+            );
+            theme::name(&menu.response, "Board");
+            menu.response
+                .on_hover_text("Rename, recolor, archive done todos, or delete");
         });
     });
     // A solid bar keeps its own space, so it never covers the item menus.
@@ -486,9 +477,14 @@ pub fn show(
         .wheel_scroll_multiplier(egui::Vec2::splat(if topmost { 1.0 } else { 0.0 }))
         .show(ui, |ui| {
             if card.archive() {
-                ui.weak("Items from deleted boards. Restore one to a board, or delete it.");
+                ui.label(
+                    egui::RichText::new(
+                        "Items from deleted boards. Restore one to a board, or delete it.",
+                    )
+                    .color(p.muted),
+                );
                 if items.todos.is_empty() && items.notes.is_empty() {
-                    ui.weak("The archive is empty.");
+                    ui.label(egui::RichText::new("The archive is empty.").color(p.faint));
                 }
                 archived_items(ui, &card, items, actions);
                 return;
@@ -509,14 +505,20 @@ pub fn show(
             if topmost {
                 promote_drop(ui, &card, todo_list, note_list, actions);
             }
-            if let Some(archived) = archived {
+            if let Some(archived) = archived
+                && archived.todos.len() + archived.notes.len() > 0
+            {
                 ui.add_space(8.0);
                 let n = archived.todos.len() + archived.notes.len();
                 let mut show = card.memory.get(ui, "show_archived").unwrap_or(false);
                 if ui
-                    .checkbox(&mut show, format!("Show archived ({n})"))
-                    .changed()
+                    .add(egui::Button::selectable(
+                        show,
+                        egui::RichText::new(format!("Show archived ({n})")).size(12.0),
+                    ))
+                    .clicked()
                 {
+                    show = !show;
                     card.memory.set(ui, "show_archived", show.then_some(true));
                 }
                 if show {
@@ -579,11 +581,23 @@ fn todos(
         .rect
 }
 
+/// A list's heading, named in plain case for assistive technology.
+fn section(ui: &mut egui::Ui, name: &str) {
+    ui.add_space(2.0);
+    let label = ui.label(theme::eyebrow(ui, name));
+    label.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, name));
+}
+
+fn empty(ui: &mut egui::Ui, text: &str) {
+    let faint = Palette::of(ui.visuals()).faint;
+    ui.label(egui::RichText::new(text).size(12.0).color(faint));
+}
+
 fn todo_list(ui: &mut egui::Ui, card: &Card, todos: &[BoardItem<Todo>], actions: &mut Vec<Action>) {
-    ui.strong("Todos");
+    section(ui, "Todos");
     add_field(ui, card, Kind::Todo, actions);
     if todos.is_empty() {
-        ui.weak("No todos");
+        empty(ui, "No todos");
     }
     reorderable(
         ui,
@@ -597,34 +611,13 @@ fn todo_list(ui: &mut egui::Ui, card: &Card, todos: &[BoardItem<Todo>], actions:
             if let Some(rect) = editor(ui, card, &draft, actions) {
                 return (rect, None);
             }
-            let fill = todo
-                .item
-                .color
-                .as_deref()
-                .and_then(|c| color_fill(c, ui.visuals()));
-            let mut frame = egui::Frame::group(ui.style());
-            if let Some(fill) = fill {
-                frame = frame.fill(fill);
-            }
-            let row = frame.show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                if fill.is_some() {
-                    // Full-contrast text on the colored row.
-                    ui.visuals_mut().override_text_color = Some(ui.visuals().strong_text_color());
-                }
+            let mark = todo.item.color.as_deref().and_then(theme::color_mark);
+            let row = row_frame(ui, mark, |ui| {
                 item_row(
                     ui,
                     |ui, actions| {
                         let mut done = card.done(&todo.item);
-                        // Done todos are struck through and dimmed.
-                        let title = if done {
-                            egui::RichText::new(&todo.item.title)
-                                .strikethrough()
-                                .color(ui.visuals().weak_text_color())
-                        } else {
-                            egui::RichText::new(&todo.item.title)
-                        };
-                        if ui.checkbox(&mut done, title).changed() {
+                        if check(ui, &mut done, &todo.item.title).changed() {
                             actions.push(card.patch(
                                 Kind::Todo,
                                 todo.item.id,
@@ -660,10 +653,10 @@ fn notes(
 }
 
 fn note_list(ui: &mut egui::Ui, card: &Card, notes: &[BoardItem<Note>], actions: &mut Vec<Action>) {
-    ui.strong("Notes");
+    section(ui, "Notes");
     add_field(ui, card, Kind::Note, actions);
     if notes.is_empty() {
-        ui.weak("No notes");
+        empty(ui, "No notes");
     }
     reorderable(
         ui,
@@ -682,7 +675,7 @@ fn note_list(ui: &mut egui::Ui, card: &Card, notes: &[BoardItem<Note>], actions:
                     ui,
                     |ui, _| {
                         if let Some(title) = &note.item.title {
-                            ui.strong(title);
+                            ui.label(theme::strong(title));
                         }
                         details(ui, Some(&note.item.body), note.item.url.as_deref(), note);
                     },
@@ -702,8 +695,13 @@ fn sticky<R>(
 ) -> egui::InnerResponse<R> {
     egui::Frame::new()
         .fill(note_fill(note.color.as_deref(), ui.visuals()))
-        .corner_radius(4.0)
-        .inner_margin(8.0)
+        .corner_radius(theme::RADIUS_MD + 2)
+        .inner_margin(egui::Margin {
+            left: 10,
+            right: 4,
+            top: 8,
+            bottom: 8,
+        })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             // Full-contrast text on the colored note.
@@ -738,6 +736,110 @@ fn item_row(
     .inner
 }
 
+/// A list row: no outline, a tint on hover, and a color bar at the left
+/// edge when the item has a color.
+fn row_frame<R>(
+    ui: &mut egui::Ui,
+    mark: Option<egui::Color32>,
+    contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let p = Palette::of(ui.visuals());
+    let mut frame = egui::Frame::new()
+        .inner_margin(egui::Margin {
+            left: 8,
+            right: 2,
+            top: 4,
+            bottom: 4,
+        })
+        .corner_radius(theme::RADIUS_MD)
+        .begin(ui);
+    frame
+        .content_ui
+        .set_width(frame.content_ui.available_width());
+    let inner = contents(&mut frame.content_ui);
+    let hovered = ui.rect_contains_pointer(frame.content_ui.min_rect().expand(4.0));
+    let hover = ui
+        .ctx()
+        .animate_bool_with_time(frame.content_ui.id().with("hover"), hovered, 0.12);
+    frame.frame.fill = egui::Color32::TRANSPARENT.lerp_to_gamma(p.hover, hover);
+    let response = frame.end(ui);
+    if let Some(mark) = mark {
+        let rect = response.rect;
+        let bar = egui::Rect::from_min_max(
+            rect.left_top() + egui::vec2(1.0, 5.0),
+            rect.left_bottom() + egui::vec2(4.0, -5.0),
+        );
+        ui.painter().rect_filled(bar, 2.0, mark);
+    }
+    egui::InnerResponse::new(inner, response)
+}
+
+/// A todo's checkbox and title, as one control: a rounded square that fills
+/// with the accent when done, and the title beside it, struck through and
+/// faded once done.
+fn check(ui: &mut egui::Ui, done: &mut bool, title: &str) -> egui::Response {
+    let p = Palette::of(ui.visuals());
+    const BOX: f32 = 16.0;
+    const GAP: f32 = 8.0;
+    let mut text = egui::RichText::new(title);
+    if *done {
+        text = text.strikethrough().color(p.faint);
+    }
+    let galley = egui::WidgetText::from(text).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Wrap),
+        (ui.available_width() - BOX - GAP).max(20.0),
+        egui::TextStyle::Body,
+    );
+    let size = egui::vec2(BOX + GAP + galley.size().x, galley.size().y.max(BOX + 2.0));
+    let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if response.clicked() {
+        *done = !*done;
+        response.mark_changed();
+    }
+    let enabled = response.enabled();
+    let state = *done;
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, state, title)
+    });
+    let line = galley.rows.first().map_or(BOX, |r| r.height());
+    let mark = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.top() + (line - BOX) / 2.0),
+        egui::vec2(BOX, BOX),
+    );
+    let painter = ui.painter();
+    if *done {
+        painter.rect_filled(mark, 4.0, p.accent);
+        let tick = [
+            mark.left_top() + egui::vec2(4.0, 8.5),
+            mark.left_top() + egui::vec2(7.0, 11.5),
+            mark.left_top() + egui::vec2(12.0, 5.0),
+        ];
+        painter.add(egui::Shape::line(
+            tick.to_vec(),
+            egui::Stroke::new(1.8, egui::Color32::WHITE),
+        ));
+    } else {
+        let edge = if response.hovered() {
+            p.accent
+        } else {
+            p.faint
+        };
+        painter.rect_stroke(
+            mark,
+            4.0,
+            egui::Stroke::new(1.5, edge),
+            egui::StrokeKind::Inside,
+        );
+    }
+    painter.galley(
+        egui::pos2(rect.left() + BOX + GAP, rect.top()),
+        galley,
+        p.text,
+    );
+    response
+}
+
 /// How a note is named in confirmations: its title or its first line.
 fn note_name(note: &Note) -> String {
     note.title.clone().unwrap_or_else(|| {
@@ -751,16 +853,20 @@ fn note_name(note: &Note) -> String {
 }
 
 fn details<T>(ui: &mut egui::Ui, body: Option<&str>, url: Option<&str>, item: &BoardItem<T>) {
+    let p = Palette::of(ui.visuals());
     if let Some(body) = body.filter(|b| !b.is_empty()) {
         ui.label(body);
     }
-    crate::app::link(ui, url);
+    if let Some(url) = url {
+        crate::feed::short_link(ui, url);
+    }
+    let quiet = |text: String| egui::RichText::new(text).size(11.5).color(p.faint);
     match &item.resolved_reference {
         Some(ResolvedReference::Live { item }) => {
-            ui.weak(format!("Source: {}", item.title));
+            ui.label(quiet(format!("From {}", item.title)));
         }
         Some(ResolvedReference::SourceGone) => {
-            ui.weak("Source gone");
+            ui.label(quiet("Source gone".into()));
         }
         None => (),
     }
@@ -807,10 +913,11 @@ fn promote_drop(
 /// A drag handle: six dots. `label` names what dragging it does.
 pub(crate) fn handle(ui: &mut egui::Ui, label: &'static str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(10.0, 16.0), egui::Sense::drag());
+    let p = Palette::of(ui.visuals());
     let color = if response.hovered() || response.dragged() {
-        ui.visuals().strong_text_color()
+        p.muted
     } else {
-        ui.visuals().weak_text_color()
+        p.grid
     };
     for (x, y) in [
         (3.0, 4.0),
@@ -899,43 +1006,52 @@ pub(crate) fn reorder_drop(
 fn item_menu(ui: &mut egui::Ui, card: &Card, draft: Draft, name: &str, actions: &mut Vec<Action>) {
     let (kind, id) = (draft.kind, draft.id);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-        ui.menu_button("…", |ui| {
-            if ui.button("Edit…").clicked() {
-                card.memory.set(
-                    ui,
-                    "draft",
-                    Some(Draft {
-                        focus: true,
-                        ..draft
-                    }),
-                );
-                ui.close();
-            }
-            ui.menu_button("Move to", |ui| {
-                let others: Vec<_> = card
-                    .boards
-                    .iter()
-                    .filter(|b| b.info.id != card.board)
-                    .collect();
-                if others.is_empty() {
-                    ui.weak("No other boards");
+        let faint = Palette::of(ui.visuals()).faint;
+        let menu = ui.menu_button(
+            theme::glyph(icon::DOTS_THREE).size(15.0).color(faint),
+            |ui| {
+                if ui.button("Edit…").clicked() {
+                    card.memory.set(
+                        ui,
+                        "draft",
+                        Some(Draft {
+                            focus: true,
+                            ..draft
+                        }),
+                    );
+                    ui.close();
                 }
-                for board in others {
-                    if ui.button(&board.info.name).clicked() {
-                        actions.push(card.patch(kind, id, json!({ "board_id": board.info.id })));
-                        ui.close();
+                ui.menu_button("Move to", |ui| {
+                    let others: Vec<_> = card
+                        .boards
+                        .iter()
+                        .filter(|b| b.info.id != card.board)
+                        .collect();
+                    if others.is_empty() {
+                        ui.weak("No other boards");
                     }
+                    for board in others {
+                        if ui.button(&board.info.name).clicked() {
+                            actions.push(card.patch(
+                                kind,
+                                id,
+                                json!({ "board_id": board.info.id }),
+                            ));
+                            ui.close();
+                        }
+                    }
+                });
+                if ui.button("Archive").clicked() {
+                    actions.push(card.patch(kind, id, json!({ "archived": true })));
+                    ui.close();
                 }
-            });
-            if ui.button("Archive").clicked() {
-                actions.push(card.patch(kind, id, json!({ "archived": true })));
-                ui.close();
-            }
-            if ui.button("Delete…").clicked() {
-                actions.push(delete(card, kind, id, name));
-                ui.close();
-            }
-        });
+                if ui.button("Delete…").clicked() {
+                    actions.push(delete(card, kind, id, name));
+                    ui.close();
+                }
+            },
+        );
+        theme::name(&menu.response, "Item menu");
     });
 }
 
