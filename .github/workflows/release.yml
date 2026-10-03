@@ -6,6 +6,10 @@ name: Release
 #
 #   git tag v0.2.0 && git push origin v0.2.0
 #
+# Normally the tag comes from Publish release (publish-release.yml), which
+# tags a merged version bump and starts this workflow for the tag directly.
+# Run against anything but a version tag, the tag check below fails.
+#
 # The tag must match Cargo.toml's version and point at a commit on main, so
 # only code that passed CI and review is released.
 #
@@ -16,6 +20,7 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: read

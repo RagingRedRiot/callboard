@@ -56,8 +56,19 @@ See [PROGRESS.md](../PROGRESS.md) for what each session built and what comes nex
 
 ## Releasing
 
-Pushing a version tag publishes a GitHub release
-(`.github/workflows/release.yml`):
+Releases are cut from the Actions tab, and pull requests never change the
+version:
+
+1. Run **Prepare release** and choose patch, minor, or major. It bumps the
+   workspace version in `Cargo.toml` and `Cargo.lock` on a `release/vX.Y.Z`
+   branch, and its summary links to a pull request for it.
+2. Open and merge that pull request. Bumping the version touches build files,
+   so it needs the `reviewed-controls` label.
+3. **Publish release** sees the higher version on `main`, tags the commit
+   `vX.Y.Z`, and starts the release build
+   (`.github/workflows/release.yml`).
+
+Pushing a tag by hand still works:
 
 ```sh
 git tag v0.2.0 && git push origin v0.2.0
@@ -68,8 +79,7 @@ on `main`. The workflow builds a static `callboard` (musl), runs the
 cross-user security fixture against that exact binary, builds `callboard-gui`
 on Ubuntu 22.04 (glibc 2.35), checks that both carry the tagged commit's
 build ID, and attaches `callboard-x86_64-linux.tar.gz` and its SHA-256
-checksum to the release. It never replaces an existing release. Bump the
-workspace version in `Cargo.toml` before tagging a new release.
+checksum to the release. It never replaces an existing release.
 
 ## The README demo
 

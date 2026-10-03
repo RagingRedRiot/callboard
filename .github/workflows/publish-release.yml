@@ -1,0 +1,60 @@
+name: Publish release
+
+# Publishes a release when a higher version reaches main, as when a Prepare
+# release pull request merges: it tags that commit vX.Y.Z and starts the
+# Release workflow for the tag. A tag pushed with this workflow's token
+# starts no workflows on its own, so Release is started directly.
+#
+# A version that goes down or stays the same publishes nothing, and an
+# existing tag is never moved.
+
+on:
+  push:
+    branches: [main]
+    paths: [Cargo.toml]
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: publish-release
+
+jobs:
+  publish:
+    name: publish
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Tag a raised version and start the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          version() { git show "$1:Cargo.toml" | sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"$/\1/p}'; }
+          after=$(version "$GITHUB_SHA")
+          before=$(version "$BEFORE" 2> /dev/null || true)
+          if [ -z "$after" ]; then
+            echo "No workspace version in Cargo.toml."
+            exit 1
+          fi
+          if [ "$before" = "$after" ]; then
+            echo "The version is still $after; nothing to publish."
+            exit 0
+          fi
+          if [ -n "$before" ] && [ "$(printf '%s\n%s\n' "$before" "$after" | sort -V | tail -1)" != "$after" ]; then
+            echo "The version went from $before down to $after; nothing to publish."
+            exit 0
+          fi
+          tag="v$after"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+            echo "$tag is already tagged; it is never moved."
+            exit 1
+          fi
+          git tag "$tag" "$GITHUB_SHA"
+          git push origin "refs/tags/$tag"
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$tag"
+          echo "### Tagged $tag and started the Release workflow" >> "$GITHUB_STEP_SUMMARY"
