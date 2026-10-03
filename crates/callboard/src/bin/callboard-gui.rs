@@ -37,6 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Callboard",
         options,
         Box::new(move |cc| {
+            callboard::appearance::follow(&cc.egui_ctx);
             App::new(paths, auto_start, no_auto_start, cc.egui_ctx.clone())
                 .map(|app| Box::new(app) as Box<dyn eframe::App>)
                 .map_err(|e| e.into())
