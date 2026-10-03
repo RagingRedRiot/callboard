@@ -2,10 +2,10 @@
 
 callboard is a Linux per-user bulletin board implemented in Rust. A background
 service stores feeds, todos, and notes; a desktop GUI pins them as cards on a
-canvas; scripts submit feeds through the CLI, and a stdio MCP server
-lets AI clients read the board and add todos and notes. This document describes
-the intended design before implementation; the schema, API, and CLI are not yet
-stable interfaces.
+canvas; scripts submit feeds through the CLI. A stdio MCP server that lets AI
+clients read the board and add todos and notes is designed (§9.3) but not
+implemented yet. This document describes the design as built, apart from MCP;
+callboard is alpha, and the schema, API, and CLI are not yet stable interfaces.
 
 ## 1. Purpose
 
@@ -466,8 +466,8 @@ A Cargo workspace:
 - `callboard-service` — the service runtime as a library: socket and lifecycle,
   routes, client, setup, upgrade, and uninstall.
 - `callboard` — the one package users install, with both binaries: `callboard`
-  for the service (`callboard serve`), the CLI, and the stdio MCP server
-  (`callboard mcp`), and `callboard-gui`, the egui desktop app. Installing them
+  for the service (`callboard serve`) and the CLI, and later the stdio MCP
+  server (`callboard mcp`, §9.3); and `callboard-gui`, the egui desktop app. Installing them
   together means the app always finds a service from the same build. The
   `callboard` binary never uses the GUI library, so it links no graphics code.
 
@@ -837,7 +837,7 @@ the new items. See §12.
 
 ### 9.3 MCP
 
-`callboard mcp` serves stdio only. It exposes:
+Not implemented yet; this section is the plan. `callboard mcp` serves stdio only. It exposes:
 
 - **read** — list feeds and boards; read a feed's items and status; read a
   board's todos and notes.

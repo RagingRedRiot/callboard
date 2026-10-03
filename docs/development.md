@@ -52,7 +52,7 @@ cargo build -p callboard
 target/debug/callboard-gui
 ```
 
-See [PROGRESS.md](../PROGRESS.md) for what each session built and what comes next.
+See the [progress log](progress.md) for what each session built and what comes next.
 
 ## Releasing
 
