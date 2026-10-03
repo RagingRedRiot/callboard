@@ -1,5 +1,9 @@
 # Canvas GUI: implementation plan
 
+**Status: implemented.** All phases landed by 30 September 2026; DESIGN.md §6
+describes the canvas as built. This plan is kept as a record of how it was
+sequenced.
+
 Replaces the tiled split/tab window (`egui_tiles`) with the canvas of cards
 specified in DESIGN.md §6.1–6.4 and §6.6. Decisions already made: cards overlap
 with click-to-front, the canvas pans (no zoom, no snapping yet), cards collapse
@@ -30,7 +34,7 @@ sense title-bar and edge drags with `interact`. egui's `Window` is the fallback
 only if it can be clipped to the canvas and its stacking order read back
 reliably; the requirement is that the GUI owns geometry and order.
 
-Exit: a short note in PROGRESS.md recording the chosen approach and anything
+Exit: a short note in the progress log ([progress.md](progress.md)) recording the chosen approach and anything
 egui made awkward (hit-testing overlap, wheel routing, focus).
 
 ## Phase 1 — Layout format in core, service, and CLI
@@ -123,7 +127,7 @@ close-flush tests. Run the GUI suite repeatedly for stability, as before.
   overlap and raise, collapse, pan, scroll a long feed, Show all, drag from the
   sidebar, and restart the GUI to confirm the layout (including view and order)
   is restored.
-- Update README (GUI section, layout CLI example) and PROGRESS.md; run the full
+- Update README (GUI section, layout CLI example) and the progress log; run the full
   local workflow.
 
 ## Order and review points
