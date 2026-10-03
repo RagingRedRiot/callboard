@@ -73,8 +73,7 @@ workspace version in `Cargo.toml` before tagging a new release.
 
 ## The README demo
 
-`docs/assets/demo-light.gif` and `demo-dark.gif` were recorded by scripting the
-real desktop app headlessly (egui_kittest with the wgpu renderer) against an
-isolated service, rendering one frame per step, and encoding with ffmpeg. The
-recorder is being turned into a standalone demo tool outside this repository;
-until then, re-recording means running it from there.
+`docs/assets/demo-light.gif` and `demo-dark.gif` were recorded from the real
+desktop app and service in an isolated session, driven by a script, with a
+demo recorder that lives outside this repository. Re-recording means running
+that recorder against a release build.
