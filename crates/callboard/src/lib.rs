@@ -1,5 +1,6 @@
 //! Desktop frontend and service connection helpers.
 pub mod app;
+pub mod appearance;
 pub mod backend;
 pub mod board;
 pub mod events;

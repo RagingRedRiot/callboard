@@ -29,6 +29,10 @@ existing `callboard.desktop` that it didn't write is left alone.
 `callboard-gui --uninstall-desktop` removes the entry and icons, and so does
 `callboard uninstall`.
 
+The app follows your desktop's light or dark appearance, read from the
+freedesktop settings portal, and switches when you change it. It exposes its
+controls to screen readers and other assistive technologies through AT-SPI.
+
 `callboard-gui --no-auto-start` requires an existing service. Both processes
 must use the same XDG and CALLBOARD_SOCKET_DIR settings. Auto-start uses the
 same kernel UID checks, data lock, and process lifecycle as CLI requests.
