@@ -564,7 +564,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "callboard"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "callboard-core",
  "callboard-service",
@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "callboard-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "humantime",
  "serde",
@@ -599,7 +599,7 @@ dependencies = [
 
 [[package]]
 name = "callboard-service"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "callboard-core",
  "http-body-util",
