@@ -16,7 +16,7 @@ path = "src/bin/callboard-gui.rs"
 callboard-core.workspace = true
 callboard-service.workspace = true
 clap.workspace = true
-eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "links", "wayland", "x11"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
