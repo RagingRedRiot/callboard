@@ -1018,6 +1018,36 @@ themes.
 - The recorder is not in this repository: it is becoming a standalone tool
   for scripted demos of any project.
 
+## Watches (#17)
+
+- A third kind of content: the user picks the URLs, the watch's script reports
+  on each (DESIGN.md §4a, §6.7). Core model and validation in
+  `callboard_core::watch`; persistence in `store::watches`; migration 0010
+  (`watches`, `watch_items` with AUTOINCREMENT IDs so a removed item's ID never
+  reaches a new one).
+- Item state is computed at read time from stored clocks (added, attention
+  since, waiting since) and the watch's `waiting_after`/`quiet_after`; the
+  passage of time sends no notice, and reads return `next_wake_at_ms`. A
+  report compares fingerprints before applying `acknowledge`. Quiet items are
+  listed once per quiet spell in report responses (`quiet_reported`).
+- Routes in a new route file, `routes/watches.rs`, which maps the new
+  not-found errors itself, so the guarded `api.rs` is unchanged. Watch names
+  use the `{feed}` capture (same rules).
+- CLI: `watch report|fail|items|rm|ack|keep-waiting|item add|item rm` and
+  `watches`, with `--exit-attention`/`--exit-quiet`.
+- GUI: watch cards (sections, Acknowledge, Keep waiting, add fields, remove
+  and delete with confirmation, details on rest), a Watches sidebar section,
+  Quick open, Add card and Show… entries, layout targets
+  `{"kind":"watch","name":...}`, and a watch list refetch at its next state
+  change. The feed card's rest-for-details logic moved into `feed::Rest` so
+  both cards share it.
+- Fixed: pills (`theme::pill`) were selectable labels and took clicks meant
+  for the row under them (a sidebar entry did not open when clicked on its
+  pill).
+- Tests: `callboard-core/tests/watches.rs` (states, order, acknowledgement,
+  quiet listing, validation, IDs, notices), `callboard/tests/watches.rs`
+  (every route's status and shape, CLI exit codes), and four GUI tests.
+
 ## Suggested next
 
 Polish from real use with a real tracking script (a GitHub query feed).

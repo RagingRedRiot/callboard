@@ -15,6 +15,8 @@ use crate::feed::{
     ValidationError, validate_color, validate_feed_name,
 };
 
+mod watches;
+
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +39,10 @@ pub enum StoreError {
     FeedItemNotFound { feed: String, key: String },
     #[error("board not found: {0}")]
     BoardNotFound(i64),
+    #[error("watch not found: {0}")]
+    WatchNotFound(String),
+    #[error("watch item not found: {watch}/{id}")]
+    WatchItemNotFound { watch: String, id: i64 },
     #[error("board is not empty: {0}")]
     BoardNotEmpty(i64),
     #[error("{kind} not found: {id}")]
@@ -517,6 +523,7 @@ pub enum Change {
     Feed { name: String },
     Board { id: i64 },
     Layout { name: String },
+    Watch { name: String },
 }
 
 pub const CHANGE_CAPACITY: usize = 128;

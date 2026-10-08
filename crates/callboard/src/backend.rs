@@ -3,6 +3,7 @@
 use callboard_core::{
     layout::{NamedLayout, Preferences},
     store::{BoardContents, BoardSummary, Feed, FeedSummary},
+    watch::{Watch, WatchSummary},
 };
 use callboard_service::{client, lifecycle::Paths};
 use serde::de::DeserializeOwned;
@@ -20,18 +21,20 @@ const MAX_CONCURRENT: usize = 8;
 pub enum Target {
     Feed(String),
     Board(i64),
+    Watch(String),
     Archive,
 }
 
 pub enum Contents {
     Feed(Feed),
+    Watch(Watch),
     /// A user board with its archived items, or the deleted-board archive
     /// (whose items are all archived) with `archived: None`.
     Board {
         items: BoardContents,
         archived: Option<BoardContents>,
     },
-    /// The feed or board no longer exists; its card stays as a placeholder.
+    /// The feed, board, or watch no longer exists; its card stays as a placeholder.
     Missing,
 }
 
@@ -41,15 +44,17 @@ pub enum List {
     Feeds,
     Boards,
     Layouts,
+    Watches,
 }
 
 impl List {
-    pub const ALL: [List; 3] = [List::Feeds, List::Boards, List::Layouts];
+    pub const ALL: [List; 4] = [List::Feeds, List::Boards, List::Layouts, List::Watches];
 }
 
 pub enum ListData {
     Feeds(Vec<FeedSummary>),
     Boards(Vec<BoardSummary>),
+    Watches(Vec<WatchSummary>),
     /// Layouts with the preferences naming the last one used.
     Layouts(Vec<NamedLayout>, Preferences),
 }
@@ -133,6 +138,7 @@ async fn list(paths: &Paths, auto: Option<&Path>, list: List) -> Result<ListData
     Ok(match list {
         List::Feeds => ListData::Feeds(required(paths, auto, "/feeds").await?),
         List::Boards => ListData::Boards(required(paths, auto, "/boards").await?),
+        List::Watches => ListData::Watches(required(paths, auto, "/watches").await?),
         List::Layouts => ListData::Layouts(
             required(paths, auto, "/layouts").await?,
             required(paths, auto, "/preferences").await?,
@@ -153,6 +159,14 @@ async fn contents(
             get(paths, auto, &format!("/feeds/{name}"))
                 .await?
                 .map(Contents::Feed)
+        }
+        Target::Watch(name) => {
+            if callboard_core::watch::validate_watch_name(name).is_err() {
+                return Ok(Contents::Missing);
+            }
+            get(paths, auto, &format!("/watches/{name}"))
+                .await?
+                .map(Contents::Watch)
         }
         Target::Board(id) if *id > 1 => match get(paths, auto, &format!("/boards/{id}")).await? {
             // Deleted between the two reads: the next notice refetches both.
@@ -188,7 +202,11 @@ pub async fn fetch(paths: &Paths, auto: Option<&Path>, request: &Request) -> Fet
         let result = list(paths, auto, *first).await;
         unreachable = result.as_ref().err().and_then(unreachable_message);
         lists.push((*first, result.map_err(|f| f.message())));
-        let (a, b) = (rest.first().copied(), rest.get(1).copied());
+        let (a, b, c) = (
+            rest.first().copied(),
+            rest.get(1).copied(),
+            rest.get(2).copied(),
+        );
         let run = |l: Option<List>, skip: bool| async move {
             match l {
                 Some(l) if !skip => Some((l, list(paths, auto, l).await)),
@@ -196,8 +214,8 @@ pub async fn fetch(paths: &Paths, auto: Option<&Path>, request: &Request) -> Fet
             }
         };
         let skip = unreachable.is_some();
-        let (ra, rb) = tokio::join!(run(a, skip), run(b, skip));
-        for result in [ra, rb].into_iter().flatten() {
+        let (ra, rb, rc) = tokio::join!(run(a, skip), run(b, skip), run(c, skip));
+        for result in [ra, rb, rc].into_iter().flatten() {
             lists.push((result.0, result.1.map_err(|f| f.message())));
         }
         if let Some(message) = &unreachable {
@@ -403,9 +421,10 @@ mod tests {
             layouts: vec![],
             preferences: Preferences::default(),
         };
-        assert_eq!(fetched.lists.len(), 3);
+        assert_eq!(fetched.lists.len(), 4);
         for (_, result) in fetched.lists {
             match result.unwrap() {
+                ListData::Watches(_) => (),
                 ListData::Feeds(f) => out.feeds = f,
                 ListData::Boards(b) => out.boards = b,
                 ListData::Layouts(l, p) => {
@@ -421,7 +440,7 @@ mod tests {
     async fn reads_authenticated_service_and_retains_deleted_target_placeholders() {
         let service = Service::new();
         let unreachable = fetch(&service.paths, None, &all(&[Target::Archive])).await;
-        assert_eq!(unreachable.lists.len(), 3);
+        assert_eq!(unreachable.lists.len(), 4);
         assert!(unreachable.lists.iter().all(|(_, r)| r.is_err()));
         assert!(unreachable.targets[0].1.is_err());
         assert!(!service.paths.socket().exists());

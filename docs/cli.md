@@ -39,6 +39,64 @@ baseline: its items are not marked new.
 `--exit-added CODE` takes precedence over `--exit-changed CODE` when both match.
 Responses are JSON on stdout; errors go to stderr with a nonzero exit status.
 
+## Watches
+
+A watch is a list of URLs you choose, on which a script reports (DESIGN.md
+§4a). The script's first run creates the watch, and you then add items:
+
+```sh
+callboard watch report tickets --title "Tickets I'm waiting on" < /dev/null
+callboard watch item add tickets https://example.com/ticket/1 --label "Refund"
+callboard watch items tickets       # IDs, URLs, and states, as a script reads them
+```
+
+On each run the script reads the items, works out a `fingerprint` for each
+(the state you care about, such as the ID of the latest comment), and reports:
+
+```sh
+#!/usr/bin/env bash
+set -euo pipefail
+watch=tickets
+items=$(callboard watch items "$watch")
+if ! report=$(printf '%s' "$items" | my-ticket-check); then
+  callboard watch fail "$watch" "ticket check failed"
+  exit 1
+fi
+printf '%s' "$report" | callboard watch report "$watch" \
+  --title "Tickets I'm waiting on" --stale-after 2h \
+  --exit-attention 10 --exit-quiet 11
+```
+
+where `my-ticket-check` prints a report object or an array of item reports:
+
+```json
+[{"id": 12, "title": "Refund for order 1182", "fingerprint": "c-4471",
+  "meta": {"status": "open", "latest": "2026-10-07"}},
+ {"id": 13, "title": "Login fails on Safari", "fingerprint": "c-990",
+  "acknowledge": true},
+ {"id": 14, "error": "could not read the page"}]
+```
+
+The first report of an item is its baseline. When its fingerprint changes, the
+item needs attention until you, or the script with `"acknowledge": true`,
+acknowledge it; the script's acknowledgement applies after the comparison, so a
+change the script knows you have dealt with (your own reply) never shows. Other
+fields change without counting as news. Items stay **New** for `--waiting-after`
+(default `1d`) and become **quiet** after waiting `--quiet-after` (default `7d`)
+without a change; either can be `never`. The report's metadata replaces the
+watch's, so send the same options every run. `--exit-attention CODE` and
+`--exit-quiet CODE` exit with that code when items newly need attention, or
+became quiet since the previous report (attention wins).
+
+```sh
+callboard watches                      # watches with attention and quiet counts
+callboard watch ack tickets 12
+callboard watch keep-waiting tickets 13
+callboard watch fail tickets 14 "page moved"   # one item; omit the ID for the watch
+callboard watch item rm tickets 12
+callboard watch rm tickets
+```
+
 ## Boards, todos, and notes
 
 Board and item commands return JSON:

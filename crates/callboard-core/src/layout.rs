@@ -46,6 +46,7 @@ pub struct Card {
 pub enum Target {
     Feed { name: String },
     Board { id: i64 },
+    Watch { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -109,7 +110,9 @@ impl Layout {
         for card in &self.cards {
             card.target.validate()?;
             if !targets.insert(&card.target) {
-                return Err(LayoutError("a layout holds one card per feed or board"));
+                return Err(LayoutError(
+                    "a layout holds one card per feed, board, or watch",
+                ));
             }
             if !coordinate(card.x) || !coordinate(card.y) {
                 return Err(LayoutError(
@@ -132,6 +135,8 @@ impl Target {
             Self::Feed { name } => {
                 validate_feed_name(name).map_err(|_| LayoutError("invalid feed target"))
             }
+            Self::Watch { name } => crate::watch::validate_watch_name(name)
+                .map_err(|_| LayoutError("invalid watch target")),
             Self::Board { id } if *id > 1 => Ok(()),
             Self::Board { .. } => Err(LayoutError(
                 "board target must be a user board ID greater than 1",

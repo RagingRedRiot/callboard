@@ -8,11 +8,13 @@ use crate::{
     quick::{self, Choice, QuickOpen},
     sync::{Link, Outcome, POLL_INTERVAL, Scheduler},
     theme::{self, Palette, icon},
+    watch::{self, WatchOp},
     workspace::{self, CardState, LayoutEntry, LayoutKey, Layouts, TITLE_HEIGHT},
 };
 use callboard_core::{
     layout::{Layout, NamedLayout},
     store::{BoardInfo, BoardSummary, Feed, FeedInfo, FeedSummary},
+    watch::{ItemState, WatchInfo, WatchSummary},
 };
 use callboard_service::lifecycle::Paths;
 use eframe::egui;
@@ -29,8 +31,12 @@ use std::{
 pub struct Cache {
     pub feeds: Vec<FeedSummary>,
     pub boards: Vec<BoardSummary>,
+    pub watches: Vec<WatchSummary>,
     pub feeds_loaded: bool,
     pub boards_loaded: bool,
+    /// Separate from [`Cache::lists_loaded`]: a service too old to serve
+    /// watches still shows its feeds and boards.
+    pub watches_loaded: bool,
     pub contents: BTreeMap<Target, Entry>,
     /// The last failure to reach the service or read resource lists.
     pub error: Option<String>,
@@ -50,8 +56,11 @@ pub struct Entry {
 pub struct Counts {
     pub shown: usize,
     pub snoozed: usize,
-    /// New or updated now (DESIGN.md §4.3).
+    /// New or updated now (DESIGN.md §4.3); for a watch, the items that
+    /// need attention.
     pub marked: usize,
+    /// A watch's quiet items.
+    pub quiet: usize,
 }
 
 impl Cache {
@@ -92,6 +101,14 @@ impl Cache {
         self.boards.iter().find(|b| b.info.id == id)
     }
 
+    fn watch(&self, name: &str) -> Option<&WatchSummary> {
+        self.watches.iter().find(|w| w.info.name == name)
+    }
+
+    fn watch_info(&self, name: &str) -> Option<&WatchInfo> {
+        self.watch(name).map(|w| &w.info)
+    }
+
     /// A board target's color, from the board list.
     pub fn board_color(&self, target: &Target) -> Option<&str> {
         match target {
@@ -108,6 +125,7 @@ impl Cache {
         ) || match target {
             Target::Feed(name) => self.feeds_loaded && self.feed(name).is_none(),
             Target::Board(id) => self.boards_loaded && self.board(*id).is_none(),
+            Target::Watch(name) => self.watches_loaded && self.watch(name).is_none(),
             Target::Archive => false,
         }
     }
@@ -120,6 +138,9 @@ impl Cache {
             Target::Board(id) => self
                 .board(*id)
                 .map_or_else(|| format!("Board {id}"), |b| b.info.name.clone()),
+            Target::Watch(name) => self
+                .watch_info(name)
+                .map_or_else(|| name.clone(), |w| w.title.clone()),
             Target::Archive => "Deleted-board archive".into(),
         }
     }
@@ -132,11 +153,19 @@ impl Cache {
                     shown: f.item_count.saturating_sub(f.snoozed_count),
                     snoozed: f.snoozed_count,
                     marked: f.new_count,
+                    quiet: 0,
                 }),
                 Target::Board(id) => self.board(*id).map(|b| Counts {
                     shown: b.todo_count + b.note_count,
                     snoozed: 0,
                     marked: 0,
+                    quiet: 0,
+                }),
+                Target::Watch(name) => self.watch(name).map(|w| Counts {
+                    shown: w.item_count,
+                    snoozed: 0,
+                    marked: w.attention_count,
+                    quiet: w.quiet_count,
                 }),
                 Target::Archive => None,
             };
@@ -152,12 +181,23 @@ impl Cache {
                     shown: feed.items.len() - snoozed,
                     snoozed,
                     marked: feed::marked(feed).count(),
+                    quiet: 0,
+                })
+            }
+            Contents::Watch(watch) => {
+                let count = |state| watch.items.iter().filter(|i| i.state == state).count();
+                Some(Counts {
+                    shown: watch.items.len(),
+                    snoozed: 0,
+                    marked: count(ItemState::Attention),
+                    quiet: count(ItemState::Quiet),
                 })
             }
             Contents::Board { items: board, .. } => Some(Counts {
                 shown: board.todos.len() + board.notes.len(),
                 snoozed: 0,
                 marked: 0,
+                quiet: 0,
             }),
             Contents::Missing => None,
         }
@@ -168,13 +208,20 @@ impl Cache {
         if self.gone(target) {
             return Some("deleted");
         }
-        let Target::Feed(name) = target else {
-            return None;
+        let (error, stale) = match target {
+            Target::Feed(name) => {
+                let feed = self.feed(name)?;
+                (feed.error.is_some(), stale(feed))
+            }
+            Target::Watch(name) => {
+                let watch = self.watch_info(name)?;
+                (watch.error.is_some(), watch::stale(watch))
+            }
+            Target::Board(_) | Target::Archive => return None,
         };
-        let feed = self.feed(name)?;
-        if feed.error.is_some() {
+        if error {
             Some("error")
-        } else if stale(feed) {
+        } else if stale {
             Some("stale")
         } else {
             None
@@ -198,6 +245,9 @@ impl Cache {
                 8.0,
                 format(font(13.0, egui::FontFamily::Proportional), p.faint),
             );
+            for (text, color) in watch_counts(target, &counts, p) {
+                job.append(&text, 8.0, format(font(12.0, theme::medium()), color));
+            }
         }
         if let Some(marker) = self.marker(target) {
             let color = if marker == "error" {
@@ -214,6 +264,9 @@ impl Cache {
         let mut title = self.title(target);
         if let Some(counts) = self.counts(target) {
             title.push_str(&format!(" ({})", counts.shown));
+            for (text, _) in watch_counts(target, &counts, Palette::of(&egui::Visuals::light())) {
+                title.push_str(&format!(" · {text}"));
+            }
         }
         if let Some(marker) = self.marker(target) {
             title.push_str(&format!(" · {marker}"));
@@ -326,6 +379,11 @@ pub enum WriteOp {
         key: String,
     },
     Board(BoardOp),
+    Watch(WatchOp),
+    /// Delete a watch and its items (from the sidebar, after confirmation).
+    DeleteWatch {
+        name: String,
+    },
 }
 
 /// What a successful write returned, where the window uses it.
@@ -382,6 +440,16 @@ pub enum DeleteSubject {
         kind: Kind,
         id: i64,
         board: i64,
+        name: String,
+    },
+    Watch {
+        name: String,
+        title: String,
+    },
+    /// An item on a watch, named by its label or title.
+    WatchItem {
+        watch: String,
+        id: i64,
         name: String,
     },
 }
@@ -560,6 +628,21 @@ impl App {
                                     .await
                                     .map(|_| Reply::Done)
                             }
+                            WriteOp::Watch(op) => {
+                                let (method, resource, body) = op.request();
+                                backend::send(paths, auto, method, &resource, &body)
+                                    .await
+                                    .map(|_| Reply::Done)
+                            }
+                            WriteOp::DeleteWatch { name } => backend::send(
+                                paths,
+                                auto,
+                                "DELETE",
+                                &format!("/watches/{name}"),
+                                &serde_json::Value::Null,
+                            )
+                            .await
+                            .map(|_| Reply::Done),
                             WriteOp::Board(op) => {
                                 let mut reply = Reply::Done;
                                 for (method, resource, body) in op.requests() {
@@ -687,6 +770,14 @@ impl App {
                             self.cache.boards = boards;
                             self.cache.boards_loaded = true;
                         }
+                        ListData::Watches(watches) => {
+                            // Items change state with time, without a notice.
+                            let wake =
+                                wake_at(watches.iter().filter_map(|w| w.next_wake_at_ms), now);
+                            self.scheduler.wake_watch_list_at(wake);
+                            self.cache.watches = watches;
+                            self.cache.watches_loaded = true;
+                        }
                         ListData::Layouts(layouts, preferences) => {
                             if !self.discard_layout_list {
                                 if !self.layouts.loaded() {
@@ -716,6 +807,11 @@ impl App {
         for (target, result) in fetched.targets {
             if let Ok(Contents::Feed(feed)) = &result {
                 self.schedule_snooze_wake(&target, feed, now);
+            }
+            if let Ok(Contents::Watch(watch)) = &result
+                && let Some(at) = wake_at(watch.next_wake_at_ms.into_iter(), now)
+            {
+                self.scheduler.wake_at(target.clone(), at);
             }
             if result.is_err() {
                 outcome.failed.push(target.clone());
@@ -821,6 +917,33 @@ impl App {
                 self.write_error = Some(format!("Could not promote the item: {error}"));
             }
             (WriteOp::Board(op), result) => self.board_done(op, result),
+            (WriteOp::Watch(op), Ok(_)) => {
+                if let WatchOp::Remove { .. } = op {
+                    self.delete_prompt = None;
+                }
+                self.scheduler.want(Target::Watch(op.watch().to_owned()));
+            }
+            (WriteOp::Watch(op), Err(error)) => {
+                let message = format!("{}: {error}", op.failure());
+                match &mut self.delete_prompt {
+                    Some(prompt) if matches!(op, WatchOp::Remove { .. }) => {
+                        prompt.waiting = false;
+                        prompt.error = Some(error);
+                    }
+                    _ => self.write_error = Some(message),
+                }
+            }
+            (WriteOp::DeleteWatch { name }, Ok(_)) => {
+                self.delete_prompt = None;
+                self.layouts.active_mut().close(&Target::Watch(name));
+            }
+            (WriteOp::DeleteWatch { .. }, Err(error)) => match &mut self.delete_prompt {
+                Some(prompt) => {
+                    prompt.waiting = false;
+                    prompt.error = Some(error);
+                }
+                None => self.write_error = Some(format!("Could not delete the watch: {error}")),
+            },
         }
     }
 
@@ -918,6 +1041,11 @@ impl App {
                 kind: *kind,
                 id: *id,
                 board: *board,
+            }),
+            DeleteSubject::Watch { name, .. } => WriteOp::DeleteWatch { name: name.clone() },
+            DeleteSubject::WatchItem { watch, id, .. } => WriteOp::Watch(WatchOp::Remove {
+                watch: watch.clone(),
+                id: *id,
             }),
         };
         match self.channels.ops.try_send(op) {
@@ -1346,6 +1474,13 @@ impl App {
                     .iter()
                     .map(|b| target("Board", b.info.name.clone(), Target::Board(b.info.id))),
             )
+            .chain(self.cache.watches.iter().map(|w| {
+                target(
+                    "Watch",
+                    w.info.title.clone(),
+                    Target::Watch(w.info.name.clone()),
+                )
+            }))
             .chain([target(
                 "Archive",
                 "Deleted-board archive".into(),
@@ -1661,6 +1796,16 @@ impl App {
                 format!("Delete the {} “{name}”?", kind.noun()),
                 "It cannot be restored. Archive it instead to keep it.",
             ),
+            DeleteSubject::Watch { title, .. } => (
+                "Delete watch".to_owned(),
+                format!("Delete the watch “{title}”?"),
+                "Its items and their labels are deleted too. A later report from its script creates it again, empty.",
+            ),
+            DeleteSubject::WatchItem { name, .. } => (
+                "Remove item".to_owned(),
+                format!("Stop watching “{name}”?"),
+                "Its label and the script's reports on it are removed. Add the URL again to watch it anew.",
+            ),
         };
         egui::Window::new(title)
             .collapsible(false)
@@ -1721,6 +1866,12 @@ impl App {
                             .chain(self.cache.boards.iter().map(|b| {
                                 (Target::Board(b.info.id), format!("Board: {}", b.info.name))
                             }))
+                            .chain(self.cache.watches.iter().map(|w| {
+                                (
+                                    Target::Watch(w.info.name.clone()),
+                                    format!("Watch: {}", w.info.title),
+                                )
+                            }))
                             .chain([(Target::Archive, "Deleted-board archive".to_owned())]);
                     for (target, mut title) in choices {
                         if placed.contains(&target) {
@@ -1774,6 +1925,28 @@ impl App {
                         ui.label(format!("Stale after {limit}"));
                     }
                     if let Some(error) = &feed.error {
+                        ui.colored_label(ui.visuals().error_fg_color, &error.message);
+                    }
+                });
+            }
+            section(ui, "Watches");
+            if !self.cache.watches_loaded {
+                ui.weak("Loading…");
+            } else if self.cache.watches.is_empty() {
+                ui.weak("No watches yet");
+            }
+            for watch in self.cache.watches.iter().map(|w| &w.info) {
+                let target = Target::Watch(watch.name.clone());
+                self.entry(ui, &target, placed, &front, actions, |ui| {
+                    ui.label(format!("Watch name: {}", watch.name));
+                    ui.label(format!(
+                        "Last reported {} ago",
+                        coarse(age(watch.last_reported_at_ms))
+                    ));
+                    if let Some(limit) = &watch.stale_after {
+                        ui.label(format!("Stale after {limit}"));
+                    }
+                    if let Some(error) = &watch.error {
                         ui.colored_label(ui.visuals().error_fg_color, &error.message);
                     }
                 });
@@ -1854,13 +2027,20 @@ impl App {
                             egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &name)
                         });
                     }
-                    if counts.marked > 0 {
+                    if counts.quiet > 0 {
                         theme::pill(
                             ui,
-                            &format!("{} new", counts.marked),
-                            p.accent_soft,
-                            p.accent_text,
+                            &format!("{} quiet", counts.quiet),
+                            p.warning_soft,
+                            p.warning,
                         );
+                    }
+                    if counts.marked > 0 {
+                        let text = match target {
+                            Target::Watch(_) => format!("{} attention", counts.marked),
+                            _ => format!("{} new", counts.marked),
+                        };
+                        theme::pill(ui, &text, p.accent_soft, p.accent_text);
                     }
                     ui.label(
                         egui::RichText::new(counts.shown.to_string())
@@ -1882,6 +2062,9 @@ impl App {
                         }
                         (Target::Feed(_), _) => {
                             ui.label(theme::glyph(icon::RSS_SIMPLE).color(p.faint));
+                        }
+                        (Target::Watch(_), _) => {
+                            ui.label(theme::glyph(icon::EYE).color(p.faint));
                         }
                         (Target::Archive, _) => {
                             ui.label(theme::glyph(icon::ARCHIVE).color(p.faint));
@@ -1929,6 +2112,16 @@ impl App {
                     op: CardOp::Close,
                 });
                 ui.close();
+            }
+            if let Target::Watch(name) = target {
+                ui.separator();
+                if ui.button("Delete watch…").clicked() {
+                    actions.push(Action::ConfirmDelete(DeleteSubject::Watch {
+                        name: name.clone(),
+                        title: title.clone(),
+                    }));
+                    ui.close();
+                }
             }
             if let Target::Board(id) = target {
                 ui.separator();
@@ -2207,6 +2400,7 @@ impl App {
             let glyph = match target {
                 Target::Feed(_) => icon::RSS_SIMPLE,
                 Target::Board(_) => icon::KANBAN,
+                Target::Watch(_) => icon::EYE,
                 Target::Archive => icon::ARCHIVE,
             };
             ui.label(theme::glyph(glyph).color(p.faint));
@@ -2283,8 +2477,8 @@ impl App {
         }
     }
 
-    /// **Show…**: point the card at another feed or board. Targets already
-    /// on the canvas are disabled (one card per feed or board).
+    /// **Show…**: point the card at another feed, board, or watch. Targets
+    /// already on the canvas are disabled (one card per target).
     fn retarget_menu(
         &self,
         ui: &mut egui::Ui,
@@ -2315,6 +2509,12 @@ impl App {
                             .chain(self.cache.boards.iter().map(|b| {
                                 (Target::Board(b.info.id), format!("Board: {}", b.info.name))
                             }))
+                            .chain(self.cache.watches.iter().map(|w| {
+                                (
+                                    Target::Watch(w.info.name.clone()),
+                                    format!("Watch: {}", w.info.title),
+                                )
+                            }))
                             .chain([(Target::Archive, "Deleted-board archive".to_string())]);
                     for (target, title) in choices {
                         let placed = canvas.find(&target).is_some();
@@ -2331,7 +2531,7 @@ impl App {
             );
         theme::name(&menu.response, "Show…");
         menu.response
-            .on_hover_text("Point this card at another feed or board");
+            .on_hover_text("Point this card at another feed, board, or watch");
         if let Some(target) = chosen.filter(|t| t != current) {
             actions.push(Action::Card {
                 canvas: canvas.id,
@@ -2375,6 +2575,7 @@ impl App {
             Some(Contents::Feed(feed)) => {
                 feed::show(ui, feed, salt, scroll, &self.cache.boards, actions)
             }
+            Some(Contents::Watch(watch)) => watch::show(ui, watch, salt, scroll, actions),
             Some(Contents::Board { items, archived }) => board::show(
                 ui,
                 target,
@@ -2547,6 +2748,7 @@ fn placeholder(ui: &mut egui::Ui, target: &Target) {
     ui.heading(match target {
         Target::Feed(name) => format!("Feed “{name}” no longer exists"),
         Target::Board(id) => format!("Board {id} no longer exists"),
+        Target::Watch(name) => format!("Watch “{name}” no longer exists"),
         Target::Archive => "The archive is unavailable".into(),
     });
     ui.label(
@@ -2555,12 +2757,39 @@ fn placeholder(ui: &mut egui::Ui, target: &Target) {
         )
         .color(p.muted),
     );
-    if let Target::Feed(_) = target {
-        ui.label(
-            egui::RichText::new("A new submission under the same name will appear here.")
-                .color(p.faint),
-        );
+    let again = match target {
+        Target::Feed(_) => Some("A new submission under the same name will appear here."),
+        Target::Watch(_) => Some("A new report under the same name will appear here."),
+        Target::Board(_) | Target::Archive => None,
+    };
+    if let Some(again) = again {
+        ui.label(egui::RichText::new(again).color(p.faint));
     }
+}
+
+/// The earliest of `deadlines` (Unix ms) still ahead, as an instant just
+/// after it, for a refetch when something changes with time.
+fn wake_at(deadlines: impl Iterator<Item = i64>, now: Instant) -> Option<Instant> {
+    let now_ms = now_ms();
+    deadlines
+        .filter(|at| *at > now_ms)
+        .min()
+        .map(|at| now + Duration::from_millis((at - now_ms) as u64 + 50))
+}
+
+/// A watch's attention and quiet counts for its title bar, when nonzero.
+fn watch_counts(target: &Target, counts: &Counts, p: &Palette) -> Vec<(String, egui::Color32)> {
+    if !matches!(target, Target::Watch(_)) {
+        return Vec::new();
+    }
+    let mut parts = Vec::new();
+    if counts.marked > 0 {
+        parts.push((format!("{} need attention", counts.marked), p.accent_text));
+    }
+    if counts.quiet > 0 {
+        parts.push((format!("{} quiet", counts.quiet), p.warning));
+    }
+    parts
 }
 
 pub(crate) fn now_ms() -> i64 {
@@ -2978,6 +3207,7 @@ mod tests {
                 shown: 2,
                 snoozed: 0,
                 marked: 0,
+                quiet: 0,
             })
         );
         assert_eq!(cache.marker(&Target::Board(4)), Some("deleted"));
@@ -2990,7 +3220,7 @@ mod tests {
         h.signals.send(Signal::Notice(Notice::Resync)).unwrap();
         h.frame();
         let resync = h.request();
-        assert_eq!(resync.lists.len(), 3);
+        assert_eq!(resync.lists.len(), 4);
         assert_eq!(resync.targets.len(), 2);
     }
 

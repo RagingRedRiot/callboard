@@ -78,6 +78,8 @@ pub struct Scheduler {
     wake: BTreeMap<Target, Instant>,
     /// Refetch the feed list when a snooze expires, which changes its counts.
     feed_list_wake: Option<Instant>,
+    /// Refetch the watch list when an item's state changes with time.
+    watch_list_wake: Option<Instant>,
     next_poll: Instant,
     in_flight: Option<Request>,
 }
@@ -100,6 +102,7 @@ impl Scheduler {
             dirty: BTreeSet::new(),
             wake: BTreeMap::new(),
             feed_list_wake: None,
+            watch_list_wake: None,
             next_poll: now,
             in_flight: None,
         }
@@ -205,6 +208,10 @@ impl Scheduler {
             Change::Layout { .. } => {
                 self.dirty_lists.insert(List::Layouts);
             }
+            Change::Watch { name } => {
+                self.dirty_lists.insert(List::Watches);
+                self.dirty.insert(Target::Watch(name));
+            }
         }
     }
 
@@ -238,6 +245,12 @@ impl Scheduler {
     /// feed list names its own next snooze deadline.
     pub fn wake_feed_list_at(&mut self, at: Option<Instant>) {
         self.feed_list_wake = at;
+    }
+
+    /// Refetch the watch list at `at`, replacing any earlier schedule: items
+    /// move between states with time, which changes its counts (§4a).
+    pub fn wake_watch_list_at(&mut self, at: Option<Instant>) {
+        self.watch_list_wake = at;
     }
 
     /// The next batch to fetch, given the targets currently open.
@@ -275,6 +288,10 @@ impl Scheduler {
         if self.feed_list_wake.is_some_and(|at| at <= now) {
             self.feed_list_wake = None;
             self.dirty_lists.insert(List::Feeds);
+        }
+        if self.watch_list_wake.is_some_and(|at| at <= now) {
+            self.watch_list_wake = None;
+            self.dirty_lists.insert(List::Watches);
         }
         self.wake.retain(|t, _| open.contains(t));
         if std::mem::take(&mut self.everything) {
@@ -336,6 +353,7 @@ impl Scheduler {
         }
         let mut deadlines: Vec<Instant> = self.wake.values().copied().collect();
         deadlines.extend(self.feed_list_wake);
+        deadlines.extend(self.watch_list_wake);
         if !self.dirty_lists.is_empty()
             && let Some(retry) = self.lists_retry
         {
@@ -413,7 +431,7 @@ mod tests {
         let visible = open(&[feed.clone(), other.clone(), board.clone(), Target::Archive]);
         let mut s = live(t0);
         let first = s.poll(t0, &visible, any).unwrap();
-        assert_eq!(first.lists.len(), 3);
+        assert_eq!(first.lists.len(), 4);
         assert_eq!(first.targets.len(), 4);
         assert!(s.poll(t0, &visible, any).is_none(), "one batch in flight");
         // Notices arriving mid-flight are kept for the next batch.

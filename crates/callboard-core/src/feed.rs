@@ -82,7 +82,7 @@ impl fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
-fn invalid(message: impl Into<String>) -> ValidationError {
+pub(crate) fn invalid(message: impl Into<String>) -> ValidationError {
     ValidationError(message.into())
 }
 

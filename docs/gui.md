@@ -39,12 +39,12 @@ same kernel UID checks, data lock, and process lifecycle as CLI requests.
 
 ## The canvas
 
-The window is a canvas of cards, one per feed or board (DESIGN.md §6.1).
+The window is a canvas of cards, one per feed, board, or watch (DESIGN.md §6.1).
 Cards overlap; clicking anywhere on a card brings it to the front. Drag a
 card's title bar to move it, drag its right or bottom edge or corner to resize
 it. The buttons at the right of its title bar collapse it to the title bar
 (which keeps showing counts) and expand it again, and remove it from the
-layout. The swap button (**Show…**) points the card at another feed or board;
+layout. The swap button (**Show…**) points the card at another feed, board, or watch;
 targets that already have a card are disabled. A long feed scrolls inside its card.
 
 ## Navigating
@@ -54,10 +54,10 @@ pan; over a card, the wheel scrolls that card. **Show all** in the layout menu
 pans back to the cards. Clicking a sidebar entry pans to its card or places a
 new one in the middle of the view; **Add card…** offers the same, the
 right-click menu can also remove a card, and dragging an entry onto the canvas
-places its card at the drop point. The sidebar lists saved layouts, feeds with
+places its card at the drop point. The sidebar lists saved layouts, feeds and watches with
 error/stale markers, and boards, each with its item count (visible and snoozed
-for feeds). **Ctrl+K** (or the **Search or jump to…** field in the top bar) finds a feed,
-board, or layout by name: type part of it, pick with Up/Down or the pointer,
+for feeds; needing attention and quiet for watches). **Ctrl+K** (or the **Search or jump to…** field in the top bar) finds a feed,
+board, watch, or layout by name: type part of it, pick with Up/Down or the pointer,
 and press Enter to reveal or place the card, or to switch layouts. The GUI
 opens the layout that was active when it last ran, or else
 the first saved layout by name. Cards whose feed or board was deleted stay in
@@ -98,6 +98,21 @@ for the gone titles). Its
 its content changes) and **Promote** (to a board as a todo or note). Snoozed
 items appear under **Show snoozed (n)**, shown when something is snoozed, where the menu offers **Unsnooze**. A failed action shows a
 dismissible message under the top bar.
+
+## Watch cards
+
+A watch card (DESIGN.md §6.7) lists the URLs you chose to follow, with what the
+watch's script last reported on each, as a queue in four sections: **Needs
+attention** (highlighted, oldest change first), **Quiet** (waiting longer than
+the watch's `quiet_after`), **New**, and **Waiting** (longest waiting first).
+Type a URL into **Add a URL to watch**, and optionally a label saying why, and
+press Enter. **Acknowledge** clears an item's attention until it changes again;
+**Keep waiting** restarts a quiet item's waiting time. Each row says how long
+it has been in its state ("changed 2h ago", "waiting 12d"); rest the pointer
+on it for the details, including its fingerprint. The **…** menu removes an
+item after confirmation, and right-clicking the watch in the sidebar deletes
+the whole watch. The title bar and sidebar count the items that need attention
+and the quiet ones, also when the card is collapsed.
 
 ## Board cards
 
