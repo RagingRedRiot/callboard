@@ -1,8 +1,8 @@
 # callboard design
 
 callboard is a Linux per-user bulletin board implemented in Rust. A background
-service stores feeds, todos, and notes; a desktop GUI pins them as cards on a
-canvas; scripts submit feeds through the CLI. A stdio MCP server that lets AI
+service stores feeds, watches, todos, and notes; a desktop GUI pins them as
+cards on a canvas; scripts submit feeds and report on watches through the CLI. A stdio MCP server that lets AI
 clients read the board and add todos and notes is designed (§9.3) but not
 implemented yet. This document describes the design as built, apart from MCP;
 callboard is alpha, and the schema, API, and CLI are not yet stable interfaces.
@@ -33,6 +33,8 @@ alpha.
 |---|---|---|
 | **Feed** | a submitting tool | until the user deletes it |
 | **Item** | the feed's tool | until a snapshot omits it |
+| **Watch** | its script | until the user deletes it |
+| **Watch item** | the user (which); the script (what it shows) | until the user removes it |
 | **Board** | the user | until the user deletes it |
 | **Todo** | the user | until archived or deleted |
 | **Note** | the user | until archived or deleted |
@@ -41,8 +43,9 @@ alpha.
 A feed is the section a tool declares by name. Each submission to a feed is a
 complete snapshot of its items. Boards hold the user's todos and notes; feeds
 never contain todos or notes, and boards never contain feed items. A todo or
-note can reference a feed item it was promoted from (§5.3). A layout arranges
-feeds and boards as cards on a canvas (§6).
+note can reference a feed item it was promoted from (§5.3). A watch is a list
+of URLs the user chose, on which a script reports (§4a). A layout arranges
+feeds, boards, and watches as cards on a canvas (§6).
 
 The service owns all persistent state, including layouts. The GUI is a client
 and holds only window geometry.
@@ -194,6 +197,180 @@ volatile value (an age, a relative time) in `meta` or the body marks the item
 updated on each change of that value. Tools should send stable values
 (timestamps, not ages).
 
+## 4a. Watches
+
+A **watch** is a named list of **watch items**: things the user chose to
+follow, such as a ticket they are waiting on or a download page for the next
+version of a tool, on which one script (the watch's script) reports. Feeds
+cannot hold a user-chosen list, and their marks are based on time alone
+(§4.3); boards belong to the user, so no script may rewrite them (§5.2).
+Watches split ownership by field:
+
+| | Feed | Board | Watch |
+|---|---|---|---|
+| Created and described by | the script | the user | the script |
+| What is on the list | the script | the user | the user |
+| What each item shows | the script | the user | the script |
+| Clearing an item's mark | nobody; marks expire | the user (done) | the user or the script |
+
+callboard still decides nothing about the source (§1). The watch's script
+decides what counts as a change through a **fingerprint**, and when a change
+has been dealt with through **acknowledgement**. Each watch has one script by
+convention; callboard does not track which tool reports to a watch, as it does
+not for feeds (§3.1).
+
+### 4a.1 Creating a watch
+
+A watch is created the way a feed is: the first report to an unknown name
+creates it. Watch names follow the feed name rules
+(`[a-z0-9][a-z0-9._-]{0,63}`) in a namespace of their own. Metadata travels
+with each report and replaces the stored values:
+
+- `title` — display name; defaults to the watch name.
+- `description` — optional plain text, at most 1000 characters.
+- `source_url` — optional link.
+- `stale_after` — optional; as for feeds (§3.5).
+- `waiting_after` — how long an added item stays **New**; a duration or
+  `never`, default `1d`.
+- `quiet_after` — how long an item can stay **Waiting** before it is
+  **quiet**; a duration or `never`, default `7d`.
+
+A new watch has no items: the script's first run creates it, and the user then
+adds items. Adding an item to a watch that does not exist is an error, so a
+mistyped name cannot create a stray watch. The user deletes a watch from the
+GUI or CLI, removing its items; a later report to the same name creates a new,
+empty watch.
+
+### 4a.2 Watch items
+
+- **The user adds an item** with a URL and an optional label, the user's own
+  note on why they are watching it, from the GUI, CLI, or API. callboard gives
+  each item an ID, never reused, so a report for a removed item cannot reach a
+  later one.
+- **URLs are unique within a watch**, compared as exact strings after trimming
+  surrounding whitespace. Adding a URL already on the watch adds nothing and
+  returns the existing item, its label unchanged. URLs are at most 2048 bytes
+  and labels 500 characters; a watch holds at most 1000 items.
+- **The user removes items.** The script never adds or removes items and never
+  changes an item's URL or label.
+- **The script reports on each item:** `title`, `body`, `tags`, `meta`, and
+  `color`, with the rules and limits of feed items (§3.2, §8.3), plus a
+  `fingerprint`. The item's URL is the user's and is not reported.
+
+### 4a.3 Fingerprint and attention
+
+The `fingerprint` is an opaque string of at most 256 characters, chosen by the
+script to stand for the state the user cares about. callboard only compares it.
+
+- **First report:** the baseline. An item the user just added does not need
+  attention for being new.
+- **Changed fingerprint:** the item **needs attention**, and callboard records
+  when that started. A further change while it already needs attention keeps
+  that time, so the item keeps its place in the queue.
+- **Unchanged fingerprint:** nothing happens, even when other reported fields
+  change, so a script can show a title or status without it counting as news.
+
+### 4a.4 Acknowledgement
+
+Acknowledging an item clears its attention until the fingerprint changes again;
+the item moves to **Waiting**. The user acknowledges from the GUI or CLI; the
+script by sending `"acknowledge": true` in a report. A report's fingerprint is
+compared first and its acknowledgement applied second, so a report that changes
+an item and acknowledges it records the change but moves the item straight to
+Waiting: it never needs attention. Acknowledging an item that does not need
+attention does nothing, so a script can send it on every run.
+
+For example, a script watching tickets uses the ID of each ticket's latest
+comment as the fingerprint and acknowledges when that comment is the user's own
+reply. The user then sees a ticket only when someone else posts.
+
+### 4a.5 Item states and clocks
+
+Every item is in one state:
+
+- **New:** added less than `waiting_after` ago, with no fingerprint change yet.
+- **Needs attention:** its fingerprint changed and nobody has acknowledged it.
+- **Waiting:** acknowledged after needing attention, or past its
+  `waiting_after` window.
+- **Quiet:** Waiting for longer than `quiet_after`.
+
+An item's **waiting clock** starts when it enters Waiting: when its
+`waiting_after` window ends, when it is acknowledged, or when the user chooses
+**Keep waiting**. The waiting clock alone decides when an item becomes quiet,
+and Waiting and Quiet rows show it ("waiting 12d"). The service stores when
+each item was added, when it started needing attention, and when an
+acknowledgement or Keep waiting last started its waiting clock; states are
+computed from these when the watch is read. The passage of time moves items
+from New to Waiting and from Waiting to Quiet without a write.
+
+### 4a.6 Order
+
+A watch is shown in four sections, each with the item that has been in its
+state longest at the top, so the list works as a queue:
+
+1. **Needs attention**, by when they started needing attention.
+2. **Quiet**, by when they became quiet.
+3. **New**, by when they were added.
+4. **Waiting**, by when they entered Waiting: the longest waiting, next in line
+   to become quiet, first.
+
+Ties go to the lower ID. The order only arranges the list; items can be opened
+or acknowledged in any order, and cannot be dragged into a manual order.
+Waiting is not a done or archived state: an item leaves the watch only when the
+user removes it.
+
+### 4a.7 New items
+
+An item is New from when it is added until `waiting_after` has passed; then it
+is Waiting and its waiting clock starts. A fingerprint change overrides New:
+the item needs attention at once and does not return to New when acknowledged.
+With `never`, items stay New until their first change. Changing
+`waiting_after` applies to existing items too, measured from when each was
+added.
+
+### 4a.8 Quiet items
+
+Some things are worth watching because nothing should stay unchanged for long.
+A Waiting item whose waiting clock passes `quiet_after` becomes quiet. The name
+is deliberately not "stale", which callboard uses for a feed or watch whose
+script has stopped reporting (§3.5).
+
+- **A fingerprint change** ends quiet: the item needs attention.
+- **Keep waiting** restarts the waiting clock of a quiet item, which becomes
+  quiet again after another `quiet_after` without a change. On an item that is
+  not quiet it does nothing.
+- **Removing** the item is the other way out.
+- **`never`:** nothing is ever quiet; rows still show their waiting time.
+- **Changing `quiet_after`** applies to existing items, measured from each
+  item's waiting clock.
+
+With both defaults, an item that never changes is New for a day, then Waiting,
+and quiet a week after that.
+
+### 4a.9 Reporting
+
+A report carries the watch metadata and reports on any of its items, keyed by
+item ID; the script reads the watch first to learn the IDs and URLs. A report
+is not a snapshot: items it leaves out keep their last report. A report item is
+either a report (`title` and `fingerprint` required, `acknowledge` optional)
+or a failure (`error` alone, at most 1000 characters), which records the
+message without changing the item's last good report; the next good report
+clears it. Reports are validated whole before anything is written.
+
+The response lists:
+
+- `attention_ids`: items that need attention because of this report;
+- `quiet_ids`: items that became quiet since the previous report, each listed
+  once per quiet spell;
+- `ignored_ids`: reported IDs that are not on the watch, such as items removed
+  since the script read it, which are not errors;
+- `created`, and `reported`: how many items it reported on.
+
+A whole run's failure is reported as for feeds (§3.4) and cleared by the next
+report; a failure for an unknown watch is an error. The CLI turns the response
+into exit codes for a scheduler to notify on (§9.1); callboard raises no
+notifications itself (§1).
+
 ## 5. Boards, todos, and notes
 
 ### 5.1 Boards
@@ -255,8 +432,8 @@ thing has resolved.
 
 ### 6.1 Canvas and cards
 
-The window is a canvas — a callboard — with a sidebar beside it. Each feed or
-board placed on the canvas is a **card**: a free-floating, resizable window with
+The window is a canvas — a callboard — with a sidebar beside it. Each feed,
+board, or watch placed on the canvas is a **card**: a free-floating, resizable window with
 a title bar. Cards may overlap; clicking anywhere on a card brings it to the
 front. The user arranges cards however suits the work: a wide feed next to a
 narrow board, a stack of small status cards in a corner.
@@ -268,11 +445,11 @@ narrow board, a stack of small status cards in a corner.
   status tile. Expanding restores its previous height.
 - **Scroll** within a card: contents never grow a card, so a feed of hundreds of
   items stays the size the user gave it and scrolls inside.
-- **Close** removes the card from the layout; the feed or board is unaffected.
+- **Close** removes the card from the layout; its target is unaffected.
 - **Show…** (the swap button in the title bar) points the card at a different
-  feed or board.
+  feed, board, or watch.
 
-A layout holds at most one card per feed or board. Targets already on the
+A layout holds at most one card per feed, board, or watch. Targets already on the
 canvas are shown but disabled in **Show…**.
 
 The canvas is unbounded and pans: drag empty canvas, or scroll the wheel or
@@ -282,7 +459,8 @@ more or less of the canvas and never moves cards. **Show all** pans so the
 top-left of the cards' bounding box is in view, recovering cards panned out of
 sight.
 
-A sidebar lists every feed and board with item counts and error/stale markers.
+A sidebar lists every feed, watch, and board with item counts and error/stale
+markers.
 Clicking an entry reveals its card (panning to it, bringing it to the front, and
 expanding it if collapsed) or, when it has none, places a new card in the middle
 of the view, offset from any card already there. **Add card…** offers the same.
@@ -291,7 +469,7 @@ Dragging an entry onto the canvas places its card at the drop point.
 Feeds that are not placed still accept submissions and stay current.
 
 **Quick open** (Ctrl+K, or **Open…** in the layout bar) finds a feed, board,
-the deleted-board archive, or a saved layout by name. Typing narrows the list;
+watch, the deleted-board archive, or a saved layout by name. Typing narrows the list;
 names that start with the text rank first, then word starts, then matches
 anywhere, then the typed letters in order. ↑/↓ move the selection; Enter or a
 click opens it: a feed or board card is revealed or placed as from the
@@ -413,8 +591,8 @@ A layout body:
 Coordinates are canvas units (the GUI's logical pixels at 100% scale), with y
 increasing downward. `view` is the canvas point shown at the top-left of the
 canvas area. `cards` is ordered back to front: the last card is drawn on top.
-Targets are `{"kind":"feed","name":...}` or `{"kind":"board","id":...}` with a
-user board ID greater than 1. `height` is the expanded height, kept while a card
+Targets are `{"kind":"feed","name":...}`, `{"kind":"watch","name":...}`, or
+`{"kind":"board","id":...}` with a user board ID greater than 1. `height` is the expanded height, kept while a card
 is collapsed. An empty layout has no cards.
 
 Unknown fields, invalid targets, and duplicate targets are rejected.
@@ -457,6 +635,30 @@ fallback for text. Buttons are ghosts until hovered; icon buttons carry
 accessible names. Item colors are a bar at a row's edge, not a filled row;
 notes keep a tint blended from the same color. A card placed by the GUI
 cascades off any card whose title bar it would cover.
+
+### 6.7 Watch cards
+
+A watch card shows the watch's description, item count, last report time, and
+any error or stale marker, then a field for a URL and an optional label (Enter
+in either adds the item), then its items in queue order (§4a.6) under a heading
+per section ("Needs attention (2)"). Each row shows the label (or the reported
+title, or the URL before the first report), the reported title under a label,
+the link (opened like feed links), and how long the item has been in its
+state ("changed 2h ago", "waiting 12d"). A reported `color` tints the row as
+for feed items, and an item's error shows under it.
+
+- **Needs attention** rows are highlighted and carry **Acknowledge**.
+- **Quiet** rows carry a "quiet" pill and **Keep waiting**.
+- The row's **…** menu removes the item after confirmation.
+- Resting on a row shows the details card as for feed items (§6.2), with the
+  label, state, when the item was added, last needed attention, and was last
+  reported, the reported body, tags, and `meta`, its fingerprint, and its ID.
+
+The card's title bar, collapsed too, and the sidebar entry show how many items
+need attention and how many are quiet, so a collapsed watch works as a status
+tile. The sidebar entry's context menu deletes the watch after confirmation,
+closing its card in the active layout. A watch's state changes with time
+(§4a.5); the GUI refetches at the `next_wake_at_ms` the service returns.
 
 ## 7. Components
 
@@ -613,6 +815,13 @@ the counterpart of setup leaving one alone.
 | `GET /layouts`, `PUT /layouts/{name}` | Read or save layouts |
 | `PATCH /layouts/{name}`, `DELETE /layouts/{name}` | Rename or delete a layout (§6.4) |
 | `GET /preferences`, `PATCH /preferences` | Read or set the startup layout (§6.4) |
+| `POST /watches/{name}/report` | Report on a watch's items; creates the watch (§4a.9) |
+| `POST /watches/{name}/error` | Report a failed run, for the watch or one item |
+| `GET /watches`, `GET /watches/{name}` | List watches; read one with its items in queue order |
+| `DELETE /watches/{name}` | Delete a watch and its items |
+| `POST /watches/{name}/items` | Add an item (`{"url", "label"}`) |
+| `PATCH /watches/{name}/items/{id}` | `{"acknowledge": true}` or `{"keep_waiting": true}` |
+| `DELETE /watches/{name}/items/{id}` | Remove an item |
 | `GET /events` | Change stream (§8.2) |
 
 Todo and note PATCH bodies contain only changed fields. JSON `null` clears an
@@ -651,6 +860,34 @@ Promotion requests provide `board_id` and `kind` (`todo` or `note`). Promotion
 copies the current source title and URL, also copying its body when present;
 both resource types retain the source reference. Notes keep the URL in their
 optional URL field.
+
+Watch routes answer 404 for an unknown watch or item. Adding an item answers
+201 with `{"created": true, "item": ...}`, or 200 with `"created": false` when
+the URL was already on the watch. An item action answers with the item; a
+PATCH body names exactly one action. The error body is `{"message"}` with an
+optional `id`. `GET /watches/{name}` returns `info` (the metadata of §4a.1,
+`last_reported_at_ms`, and `error`), `items`, and `next_wake_at_ms`: when an
+item next changes state with time. Each item has its `id`, `url`, `label`,
+`added_at_ms`, the last good report as `content` (null until the first),
+`fingerprint`, `reported_at_ms`, `changed_at_ms` (the last fingerprint
+change), `error`, `attention_since_ms`, and, evaluated at read time, `state`
+(`attention`, `quiet`, `new`, or `waiting`), `state_since_ms`, and
+`waiting_since_ms`. `GET /watches` entries add `item_count`,
+`attention_count`, `quiet_count`, `new_count`, and `next_wake_at_ms` to the
+metadata.
+
+A report body:
+
+```json
+{"title": "Tickets I'm waiting on", "stale_after": "2h",
+ "waiting_after": "1d", "quiet_after": "7d",
+ "items": [
+  {"id": 12, "title": "Example ticket", "fingerprint": "4",
+   "meta": {"latest": "2026-10-07"}},
+  {"id": 13, "title": "Another ticket", "fingerprint": "a91c", "acknowledge": true},
+  {"id": 14, "error": "could not read the page"}
+]}
+```
 
 A snapshot body:
 
@@ -696,7 +933,10 @@ The response uses `text/event-stream`. After each successful committed write,
 - `{"resource":"feed","name":"reviews"}` for submissions, error status,
   snooze/order changes, or deletion;
 - `{"resource":"board","id":2}` for board and contained-item changes;
-- `{"resource":"layout","name":"Day"}` for layout saves.
+- `{"resource":"layout","name":"Day"}` for layout saves;
+- `{"resource":"watch","name":"tickets"}` for reports, failures, items added
+  or removed, acknowledgements, Keep waiting, and deletion. Changes of state
+  with time (§4a.5) send no notice.
 
 Moves invalidate both origin and destination boards. Board ID 1 identifies the
 system archive (`GET /archive`). Feed notices also invalidate display-time
@@ -773,6 +1013,29 @@ API semantics. `--no-auto-start` applies to all these commands.
 16 KiB), covering snooze and manual order fields (§8.1). `feed promote NAME KEY
 BOARD [--kind todo|note]` copies an item into the selected board; the default
 kind is todo. Feed keys are literal strings, encoded exactly once by the CLI.
+
+Watch commands:
+
+```sh
+some-check | callboard watch report tickets --exit-attention 10 --exit-quiet 11
+callboard watch fail tickets [ID] "message"
+callboard watches
+callboard watch items tickets
+callboard watch rm tickets
+callboard watch item add tickets https://example.com/ticket/1 --label "Refund"
+callboard watch item rm tickets ID
+callboard watch ack tickets ID
+callboard watch keep-waiting tickets ID
+```
+
+`watch report` reads a report object, or a JSON array of item reports, from
+standard input; empty input reports metadata only, which is how a script's
+first run creates its watch. `--title`, `--description`, `--source-url`,
+`--stale-after`, `--waiting-after`, and `--quiet-after` override the
+corresponding fields. `--exit-attention CODE` exits with `CODE` when items
+newly need attention, and `--exit-quiet CODE` when items became quiet since the
+previous report; `--exit-attention` takes precedence. `watch items` prints what
+a script reads to learn item IDs.
 
 `upgrade` moves the running service onto the installed binary in place;
 `uninstall [--purge] [--yes]` removes the unit, service, and data; `setup

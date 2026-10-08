@@ -28,10 +28,14 @@ and save.
 - **Feeds from any script.** Pipe a JSON list to `callboard put` and callboard
   diffs it against the last run: new and updated items are marked, removed ones
   remembered, and an exit code tells your scheduler when something arrived.
+- **Watches for what you're waiting on.** Add the URLs you care about; a
+  script reports on each, and an item needs your attention only when its
+  fingerprint changes, until you or the script acknowledge it. Items that sit
+  unchanged too long turn quiet.
 - **Boards for the rest.** Todos and notes, with colors, archives, and promotion
   from any feed item in one drag.
 - **A canvas you arrange.** Cards overlap, resize, and collapse; layouts save
-  automatically, and Ctrl+K finds any feed, board, or layout.
+  automatically, and Ctrl+K finds any feed, watch, board, or layout.
 - **Live everywhere.** Every write reaches every open window at once, from the
   CLI, a script, or another window.
 - **Private to your account.** A per-user service on a Unix socket checks each

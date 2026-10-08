@@ -15,6 +15,7 @@ pub mod icon {
     pub const ARROWS_LEFT_RIGHT: &str = "\u{E0A0}";
     pub const CARET_DOWN: &str = "\u{E136}";
     pub const DOTS_THREE: &str = "\u{E1FE}";
+    pub const EYE: &str = "\u{E220}";
     pub const KANBAN: &str = "\u{EB54}";
     pub const MAGNIFYING_GLASS: &str = "\u{E30C}";
     pub const MINUS: &str = "\u{E32A}";
@@ -333,11 +334,15 @@ pub fn pill(ui: &mut egui::Ui, text: &str, fill: Color32, color: Color32) -> egu
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::symmetric(6, 1))
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(text)
-                    .size(11.0)
-                    .family(medium())
-                    .color(color),
+            // Not selectable, so a pill on a clickable row never takes its clicks.
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(text)
+                        .size(11.0)
+                        .family(medium())
+                        .color(color),
+                )
+                .selectable(false),
             )
         })
         .response

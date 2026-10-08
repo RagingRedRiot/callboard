@@ -4,6 +4,7 @@
 use crate::{
     app::{App, OpDone, Reply, SaveDone, SavePurpose, TestEnds, WriteOp},
     backend::{Contents, Fetched, List, ListData, PromoteKind, Request, Target},
+    watch::WatchOp,
     workspace::{Canvas, LayoutKey, MIN_CARD, SAVE_DELAY, TITLE_HEIGHT},
 };
 use callboard_core::{
@@ -13,6 +14,7 @@ use callboard_core::{
         BoardContents, BoardInfo, BoardSummary, ChangeStatus, Feed, FeedInfo, FeedSummary,
         ItemChange, ItemViewState, LastChange, RemovedItem,
     },
+    watch::{Watch, WatchInfo, WatchItem, WatchSummary},
 };
 use eframe::egui::{self, Pos2, Rect, Vec2};
 use egui_kittest::{
@@ -55,6 +57,48 @@ fn feed_info(name: &str) -> FeedInfo {
 
 fn feed(name: &str) -> Target {
     Target::Feed(name.into())
+}
+
+const TICKETS: &str = "Tickets I'm waiting on";
+
+fn watch_info() -> WatchInfo {
+    WatchInfo {
+        name: "tickets".into(),
+        title: TICKETS.into(),
+        description: None,
+        source_url: None,
+        stale_after: None,
+        waiting_after: "1d".into(),
+        quiet_after: "7d".into(),
+        last_reported_at_ms: minutes_ago(5),
+        error: None,
+    }
+}
+
+/// Watch "tickets" in queue order: one item in each state.
+fn watch() -> Watch {
+    let item = |id: i64, state: &str, label: Option<&str>, minutes: i64| -> WatchItem {
+        serde_json::from_value(json!({
+            "id": id, "url": format!("https://example.com/ticket/{id}"), "label": label,
+            "added_at_ms": minutes_ago(minutes), "fingerprint": "1",
+            "content": {"title": format!("Ticket {id}")},
+            "reported_at_ms": minutes_ago(5), "changed_at_ms": null, "error": null,
+            "attention_since_ms": (state == "attention").then(|| minutes_ago(30)),
+            "state": state, "state_since_ms": minutes_ago(30),
+            "waiting_since_ms": matches!(state, "quiet" | "waiting").then(|| minutes_ago(minutes)),
+        }))
+        .unwrap()
+    };
+    Watch {
+        info: watch_info(),
+        items: vec![
+            item(1, "attention", Some("Refund request"), 60),
+            item(2, "quiet", None, 20_000),
+            item(3, "new", None, 10),
+            item(4, "waiting", None, 3_000),
+        ],
+        next_wake_at_ms: None,
+    }
 }
 
 /// A saved layout with one card per target, placed as the sidebar would.
@@ -178,6 +222,14 @@ fn answer(request: Request, saved: &Saved) -> Fetched {
                 List::Layouts => {
                     ListData::Layouts(saved.layouts.clone(), saved.preferences.clone())
                 }
+                List::Watches => ListData::Watches(vec![WatchSummary {
+                    info: watch_info(),
+                    item_count: 4,
+                    attention_count: 1,
+                    quiet_count: 1,
+                    new_count: 1,
+                    next_wake_at_ms: None,
+                }]),
             };
             (*list, Ok(data))
         })
@@ -262,6 +314,7 @@ fn answer(request: Request, saved: &Saved) -> Fetched {
                         &[],
                     )),
                 },
+                Target::Watch(name) if name == "tickets" => Contents::Watch(watch()),
                 Target::Board(3) => Contents::Board {
                     items: board(3, Some("Later"), &[], &[]),
                     archived: Some(board(3, Some("Later"), &[], &[])),
@@ -2156,4 +2209,182 @@ fn a_missing_service_binary_is_named_instead_of_the_socket_error() {
     }
     harness.get_by_label_contains("service binary is not installed");
     assert!(harness.query_by_label_contains("No such file").is_none());
+}
+
+/// A window with the "tickets" watch card placed and startup writes drained.
+fn tickets() -> Ui {
+    let mut ui = Ui::new();
+    ui.harness.get_by_label(TICKETS).click();
+    ui.settle();
+    ui.ops();
+    ui
+}
+
+fn watch_op(op: WatchOp) -> WriteOp {
+    WriteOp::Watch(op)
+}
+
+#[test]
+fn a_watch_card_shows_its_queue_and_counts() {
+    let mut ui = tickets();
+    assert!(ui.order().contains(&Target::Watch("tickets".into())));
+    for heading in ["Needs attention (1)", "Quiet (1)", "New (1)", "Waiting (1)"] {
+        ui.harness.get_by_label(heading);
+    }
+    // The label names the row; the reported title follows it.
+    ui.harness.get_by_label("Refund request");
+    ui.harness.get_by_label("Ticket 1");
+    // Counts in the card's title bar and the sidebar, collapsed or not.
+    let title = format!("{TICKETS} (4) · 1 need attention · 1 quiet");
+    ui.harness.get_by_label(&title);
+    ui.harness.get_by_label("1 attention");
+    ui.harness.get_by_label("1 quiet");
+    let card = ui.card(&Target::Watch("tickets".into()));
+    ui.harness
+        .query_all_by_label("Collapse card")
+        .find(|n| card.contains(n.rect().center()))
+        .expect("the watch card's collapse button")
+        .click();
+    ui.settle();
+    assert!(
+        ui.canvas()
+            .card(&Target::Watch("tickets".into()))
+            .unwrap()
+            .collapsed
+    );
+    ui.harness.get_by_label(&title);
+}
+
+#[test]
+fn acknowledge_and_keep_waiting_act_on_their_items() {
+    let mut ui = tickets();
+    ui.harness.get_by_label("Acknowledge").click();
+    ui.settle();
+    ui.harness.get_by_label("Keep waiting").click();
+    ui.settle();
+    let ops = ui.ops();
+    assert_eq!(
+        ops,
+        [
+            watch_op(WatchOp::Acknowledge {
+                watch: "tickets".into(),
+                id: 1
+            }),
+            watch_op(WatchOp::KeepWaiting {
+                watch: "tickets".into(),
+                id: 2
+            }),
+        ]
+    );
+    // Success refetches the watch without waiting for the change notice.
+    ui.finish(ops[0].clone(), Ok(Reply::Done));
+    // A failure shows in the error bar.
+    ui.finish(ops[1].clone(), Err("HTTP 500: storage failure".into()));
+    ui.harness
+        .get_by_label_contains("Could not keep the item waiting");
+}
+
+#[test]
+fn the_add_fields_add_a_url_with_an_optional_label() {
+    let mut ui = tickets();
+    ui.field("Add a URL to watch").focus();
+    ui.harness.step();
+    type_keys(&mut ui, "https://example.com/ticket/9");
+    ui.harness.key_press(egui::Key::Enter);
+    ui.settle();
+    ui.field("Add a URL to watch").focus();
+    ui.harness.step();
+    type_keys(&mut ui, " https://example.com/ticket/10 ");
+    ui.field("Label (optional)").focus();
+    ui.harness.step();
+    type_keys(&mut ui, "Waiting on legal");
+    ui.harness.key_press(egui::Key::Enter);
+    ui.settle();
+    assert_eq!(
+        ui.ops(),
+        [
+            watch_op(WatchOp::Add {
+                watch: "tickets".into(),
+                url: "https://example.com/ticket/9".into(),
+                label: None,
+            }),
+            watch_op(WatchOp::Add {
+                watch: "tickets".into(),
+                url: "https://example.com/ticket/10".into(),
+                label: Some("Waiting on legal".into()),
+            }),
+        ]
+    );
+    assert_eq!(ui.field("Add a URL to watch").value().as_deref(), Some(""));
+    assert_eq!(ui.field("Label (optional)").value().as_deref(), Some(""));
+}
+
+#[test]
+fn removing_an_item_and_deleting_a_watch_ask_first() {
+    let mut ui = tickets();
+    let card = ui.card(&Target::Watch("tickets".into()));
+    // The menu on the "Refund request" row; the feed card's lie beneath.
+    let row = ui.harness.get_by_label("Refund request").rect();
+    let menu = ui
+        .harness
+        .query_all_by_label("Item menu")
+        .map(|node| node.rect().center())
+        .find(|p| {
+            card.contains(*p)
+                && p.x > row.right()
+                && (row.top() - 4.0..row.top() + 24.0).contains(&p.y)
+        })
+        .expect("the row's item menu");
+    ui.click_at(menu);
+    ui.harness.get_by_label("Remove…").click();
+    ui.settle();
+    ui.harness.get_by_label("Stop watching “Refund request”?");
+    ui.harness.get_by_label("Delete").click();
+    ui.settle();
+    let ops = ui.ops();
+    assert_eq!(
+        ops,
+        [watch_op(WatchOp::Remove {
+            watch: "tickets".into(),
+            id: 1
+        })]
+    );
+    ui.finish(ops[0].clone(), Ok(Reply::Done));
+    assert!(ui.app().delete_prompt.is_none());
+
+    let entry = ui
+        .harness
+        .query_all_by_label(TICKETS)
+        .find(|n| !card.contains(n.rect().center()))
+        .expect("the sidebar entry")
+        .rect()
+        .center();
+    ui.harness.hover_at(entry);
+    ui.harness.step();
+    ui.harness.event(egui::Event::PointerButton {
+        pos: entry,
+        button: egui::PointerButton::Secondary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    ui.harness.event(egui::Event::PointerButton {
+        pos: entry,
+        button: egui::PointerButton::Secondary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    ui.settle();
+    ui.harness.get_by_label("Delete watch…").click();
+    ui.settle();
+    ui.harness.get_by_label("Delete").click();
+    ui.settle();
+    let ops = ui.ops();
+    assert_eq!(
+        ops,
+        [WriteOp::DeleteWatch {
+            name: "tickets".into()
+        }]
+    );
+    ui.finish(ops[0].clone(), Ok(Reply::Done));
+    assert!(!ui.order().contains(&Target::Watch("tickets".into())));
 }

@@ -1,8 +1,10 @@
 mod board_cli;
 mod view_cli;
+mod watch_cli;
 
-use callboard_core::feed::{
-    ChangeSummary, MAX_SNAPSHOT_BYTES, parse_submission, validate_feed_name,
+use callboard_core::{
+    feed::{ChangeSummary, MAX_SNAPSHOT_BYTES, parse_submission, validate_feed_name},
+    watch::ReportSummary,
 };
 use callboard_service::{
     Error, client,
@@ -113,6 +115,20 @@ enum Command {
         #[command(subcommand)]
         command: view_cli::FeedCommand,
     },
+    /// List watches as JSON, with attention and quiet counts.
+    Watches,
+    Watch {
+        #[command(subcommand)]
+        command: watch_cli::WatchCommand,
+    },
+}
+
+/// Exit codes chosen by what a write changed.
+enum Exits {
+    /// `put`: (added, changed).
+    Put(Option<u8>, Option<u8>),
+    /// `watch report`: (attention, quiet).
+    Report(watch_cli::Exits),
 }
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -224,7 +240,7 @@ async fn run(cli: Cli) -> Result<u8, Error> {
                 "PUT",
                 format!("/feeds/{name}"),
                 body,
-                Some((exit_added, exit_changed)),
+                Some(Exits::Put(exit_added, exit_changed)),
             )
         }
         Command::Boards => ("GET", "/boards".into(), vec![], None),
@@ -258,6 +274,11 @@ async fn run(cli: Cli) -> Result<u8, Error> {
             let req = view_cli::feed(command, &paths, auto).await?;
             (req.method, req.resource, req.body, None)
         }
+        Command::Watches => ("GET", "/watches".into(), vec![], None),
+        Command::Watch { command } => {
+            let (req, exits) = watch_cli::watch(command).await?;
+            (req.method, req.resource, req.body, exits.map(Exits::Report))
+        }
         Command::Layouts => ("GET", "/layouts".into(), vec![], None),
         Command::Layout { command } => {
             let req = view_cli::layout(command).await?;
@@ -268,17 +289,25 @@ async fn run(cli: Cli) -> Result<u8, Error> {
     if !status.is_success() {
         return Err(format!("HTTP {status}: {}", String::from_utf8_lossy(&body)).into());
     }
-    let code = if let Some((added, changed)) = exits {
-        let summary: ChangeSummary = serde_json::from_slice(&body)?;
-        if let Some(code) = added.filter(|_| summary.added > 0) {
-            code
-        } else if summary.added + summary.removed + summary.updated > 0 {
-            changed.unwrap_or(0)
-        } else {
-            0
+    let code = match exits {
+        Some(Exits::Put(added, changed)) => {
+            let summary: ChangeSummary = serde_json::from_slice(&body)?;
+            if let Some(code) = added.filter(|_| summary.added > 0) {
+                code
+            } else if summary.added + summary.removed + summary.updated > 0 {
+                changed.unwrap_or(0)
+            } else {
+                0
+            }
         }
-    } else {
-        0
+        Some(Exits::Report((attention, quiet))) => {
+            let summary: ReportSummary = serde_json::from_slice(&body)?;
+            attention
+                .filter(|_| !summary.attention_ids.is_empty())
+                .or(quiet.filter(|_| !summary.quiet_ids.is_empty()))
+                .unwrap_or(0)
+        }
+        None => 0,
     };
     let mut out = std::io::stdout().lock();
     out.write_all(&body)?;

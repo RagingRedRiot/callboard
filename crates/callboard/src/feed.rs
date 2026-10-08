@@ -157,6 +157,80 @@ struct Dwell {
     since: f64,
 }
 
+/// Details on rest for one card's rows: [`Rest::lit`] while drawing them,
+/// then [`Rest::end`] with the row the pointer rests on, if any.
+pub(crate) struct Rest {
+    id: egui::Id,
+    dwell: Option<Dwell>,
+    now: f64,
+}
+
+impl Rest {
+    pub fn begin(ui: &egui::Ui, salt: egui::Id) -> Self {
+        let id = salt.with("dwell");
+        Self {
+            id,
+            dwell: ui.data(|d| d.get_temp(id)),
+            now: ui.input(|i| i.time),
+        }
+    }
+
+    /// Whether `row` is highlighted: the pointer rests on it.
+    pub fn lit(&self, row: egui::Id) -> bool {
+        self.dwell.is_some_and(|d| d.row == row)
+    }
+
+    /// Whether the pointer can rest on `rect`: the topmost card (`scroll`),
+    /// nothing dragged or open.
+    pub fn resting(ui: &egui::Ui, rect: egui::Rect, scroll: bool) -> bool {
+        scroll
+            && ui.rect_contains_pointer(rect)
+            && !ui.input(|i| i.pointer.any_down())
+            && !egui::Popup::is_any_open(ui.ctx())
+    }
+
+    /// Show the details of the row resting since [`DWELL`], or the cue that
+    /// the wait is under way.
+    pub fn end(
+        self,
+        ui: &egui::Ui,
+        resting: Option<(egui::Id, egui::Rect)>,
+        details: impl FnOnce(&mut egui::Ui),
+    ) {
+        let p = Palette::of(ui.visuals());
+        let next = resting.map(|(row, rect)| {
+            let since = self
+                .dwell
+                .filter(|d| d.row == row)
+                .map_or(self.now, |d| d.since);
+            let waited = self.now - since;
+            if waited >= DWELL {
+                show_details(ui, row, rect, details);
+            } else {
+                ui.ctx().request_repaint_after_secs((DWELL - waited) as f32);
+                // A line fills along the row's foot while the pointer rests.
+                if waited >= CUE_AFTER {
+                    let progress = ((waited - CUE_AFTER) / (DWELL - CUE_AFTER)) as f32;
+                    let x = rect.left()..=rect.left() + rect.width() * progress;
+                    ui.painter()
+                        .hline(x, rect.bottom() - 1.0, egui::Stroke::new(2.0, p.accent));
+                }
+            }
+            Dwell { row, since }
+        });
+        if next != self.dwell {
+            ui.data_mut(|d| match next {
+                Some(next) => {
+                    d.insert_temp(self.id, next);
+                }
+                None => d.remove::<Dwell>(self.id),
+            });
+            // Highlight (or unhighlight) the row on the next frame.
+            ui.ctx().request_repaint();
+        }
+    }
+}
+
 /// Everything about an item, shown after the pointer rests on its row.
 fn details(ui: &mut egui::Ui, feed: &Feed, item: &Item) {
     ui.set_max_width(440.0);
@@ -183,10 +257,25 @@ fn details(ui: &mut egui::Ui, feed: &Feed, item: &Item) {
         ui.add_space(4.0);
         ui.label(body);
     }
-    if !item.tags.is_empty() {
+    tags_and_meta(ui, &item.tags, &item.meta);
+    ui.add_space(4.0);
+    let key = match &item.color {
+        Some(color) => format!("Key: {} · color: {color}", item.key),
+        None => format!("Key: {}", item.key),
+    };
+    ui.weak(egui::RichText::new(key).small());
+}
+
+/// An item's tags as chips, then its `meta` as a key/value grid.
+pub(crate) fn tags_and_meta(
+    ui: &mut egui::Ui,
+    tags: &[String],
+    meta: &std::collections::BTreeMap<String, MetaValue>,
+) {
+    if !tags.is_empty() {
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
-            for tag in &item.tags {
+            for tag in tags {
                 egui::Frame::new()
                     .fill(ui.visuals().faint_bg_color)
                     .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
@@ -196,25 +285,19 @@ fn details(ui: &mut egui::Ui, feed: &Feed, item: &Item) {
             }
         });
     }
-    if !item.meta.is_empty() {
+    if !meta.is_empty() {
         ui.add_space(4.0);
         egui::Grid::new("meta")
             .num_columns(2)
             .spacing([12.0, 2.0])
             .show(ui, |ui| {
-                for (key, value) in &item.meta {
+                for (key, value) in meta {
                     ui.weak(key);
                     ui.label(meta_text(value));
                     ui.end_row();
                 }
             });
     }
-    ui.add_space(4.0);
-    let key = match &item.color {
-        Some(color) => format!("Key: {} · color: {color}", item.key),
-        None => format!("Key: {}", item.key),
-    };
-    ui.weak(egui::RichText::new(key).small());
 }
 
 fn meta_text(value: &MetaValue) -> String {
@@ -227,7 +310,7 @@ fn meta_text(value: &MetaValue) -> String {
 
 /// Only the topmost card under the pointer scrolls with the wheel: with a
 /// multiplier of 0 a covered card neither scrolls nor consumes the wheel.
-fn wheel(scroll: bool) -> egui::Vec2 {
+pub(crate) fn wheel(scroll: bool) -> egui::Vec2 {
     egui::Vec2::splat(if scroll { 1.0 } else { 0.0 })
 }
 
@@ -334,9 +417,7 @@ pub fn show(
             let mut shown: Vec<&str> = Vec::new();
             let mut rects = Vec::new();
             let mut dragging = None;
-            let now = ui.input(|i| i.time);
-            let dwell_id = salt.with("dwell");
-            let dwell: Option<Dwell> = ui.data(|d| d.get_temp(dwell_id));
+            let rest = Rest::begin(ui, salt);
             let mut resting = None;
             for item in &feed.items {
                 let state = feed.view_state.get(&item.key).filter(|s| s.snoozed);
@@ -345,7 +426,7 @@ pub fn show(
                 }
                 let row_id = salt.with(("row", &item.key));
                 // Highlighted while the pointer rests on it.
-                let lit = dwell.is_some_and(|d| d.row == row_id);
+                let lit = rest.lit(row_id);
                 let mut frame = egui::Frame::new()
                     .inner_margin(egui::Margin {
                         left: 10,
@@ -439,12 +520,7 @@ pub fn show(
                     );
                     ui.painter().rect_filled(bar, 2.0, mark);
                 }
-                // Resting here: the topmost card, nothing dragged or open.
-                if scroll
-                    && ui.rect_contains_pointer(rect)
-                    && !ui.input(|i| i.pointer.any_down())
-                    && !egui::Popup::is_any_open(ui.ctx())
-                {
+                if Rest::resting(ui, rect, scroll) {
                     resting = Some((row_id, rect, item));
                 }
                 ui.add_space(2.0);
@@ -456,36 +532,12 @@ pub fn show(
                 shown.push(&item.key);
                 rects.push(rect);
             }
-            let next = resting.map(|(row, rect, item)| {
-                let since = dwell.filter(|d| d.row == row).map_or(now, |d| d.since);
-                let waited = now - since;
-                if waited >= DWELL {
-                    show_details(ui, row, rect, feed, item);
-                } else {
-                    ui.ctx().request_repaint_after_secs((DWELL - waited) as f32);
-                    // A line fills along the row's foot while the pointer rests.
-                    if waited >= CUE_AFTER {
-                        let progress = ((waited - CUE_AFTER) / (DWELL - CUE_AFTER)) as f32;
-                        let x = rect.left()..=rect.left() + rect.width() * progress;
-                        ui.painter().hline(
-                            x,
-                            rect.bottom() - 1.0,
-                            egui::Stroke::new(2.0, p.accent),
-                        );
-                    }
+            let item = resting.map(|(_, _, item)| item);
+            rest.end(ui, resting.map(|(row, rect, _)| (row, rect)), |ui| {
+                if let Some(item) = item {
+                    details(ui, feed, item);
                 }
-                Dwell { row, since }
             });
-            if next != dwell {
-                ui.data_mut(|d| match next {
-                    Some(next) => {
-                        d.insert_temp(dwell_id, next);
-                    }
-                    None => d.remove::<Dwell>(dwell_id),
-                });
-                // Highlight (or unhighlight) the row on the next frame.
-                ui.ctx().request_repaint();
-            }
             if let Some((from, grip)) = dragging
                 && let Some(to) = board::reorder_drop(ui, &rects, from, &grip)
             {
@@ -517,7 +569,12 @@ pub(crate) fn feed_position(all: &[&str], shown: &[&str], from: usize, to: usize
 }
 
 /// The details card beside a row, above everything else.
-fn show_details(ui: &egui::Ui, row: egui::Id, rect: egui::Rect, feed: &Feed, item: &Item) {
+fn show_details(
+    ui: &egui::Ui,
+    row: egui::Id,
+    rect: egui::Rect,
+    details: impl FnOnce(&mut egui::Ui),
+) {
     let pointer = ui.ctx().pointer_hover_pos().unwrap_or(rect.right_top());
     egui::Area::new(row.with("details"))
         .order(egui::Order::Tooltip)
@@ -525,7 +582,7 @@ fn show_details(ui: &egui::Ui, row: egui::Id, rect: egui::Rect, feed: &Feed, ite
         .constrain(true)
         .interactable(false)
         .show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| details(ui, feed, item));
+            egui::Frame::popup(ui.style()).show(ui, details);
         });
 }
 

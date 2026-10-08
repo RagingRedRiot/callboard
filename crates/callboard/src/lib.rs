@@ -12,6 +12,7 @@ mod testing;
 pub mod theme;
 #[cfg(test)]
 mod ui_tests;
+pub mod watch;
 pub mod workspace;
 
 use std::path::{Path, PathBuf};

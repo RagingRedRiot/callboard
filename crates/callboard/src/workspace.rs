@@ -73,6 +73,7 @@ impl Canvas {
                 target: match &card.target {
                     layout::Target::Feed { name } => Target::Feed(name.clone()),
                     layout::Target::Board { id } => Target::Board(*id),
+                    layout::Target::Watch { name } => Target::Watch(name.clone()),
                 },
                 rect: Rect::from_min_size(
                     Pos2::new(card.x as f32, card.y as f32),
@@ -104,6 +105,7 @@ impl Canvas {
                     let target = match &card.target {
                         Target::Feed(name) => layout::Target::Feed { name: name.clone() },
                         Target::Board(id) => layout::Target::Board { id: *id },
+                        Target::Watch(name) => layout::Target::Watch { name: name.clone() },
                         Target::Archive => return None,
                     };
                     Some(layout::Card {
@@ -235,7 +237,7 @@ impl Canvas {
     }
 
     /// Point a card at another target, keeping its geometry. Refused when
-    /// the new target already has a card (one card per feed or board).
+    /// the new target already has a card (one card per feed, board, or watch).
     pub fn retarget(&mut self, from: &Target, to: Target) -> bool {
         if self.find(&to).is_some() {
             return false;
