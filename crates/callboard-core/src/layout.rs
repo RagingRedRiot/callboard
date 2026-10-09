@@ -10,6 +10,9 @@ pub const MAX_CARDS: usize = 256;
 pub const MAX_COORDINATE: f64 = 1_000_000.0;
 /// Largest card width or height, in canvas units.
 pub const MAX_CARD_SIZE: f64 = 100_000.0;
+/// Smallest and largest canvas zoom.
+pub const MIN_ZOOM: f64 = 0.25;
+pub const MAX_ZOOM: f64 = 2.0;
 
 /// The arrangement of cards on the canvas.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -21,11 +24,28 @@ pub struct Layout {
     pub cards: Vec<Card>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct View {
     pub x: f64,
     pub y: f64,
+    /// Screen points per canvas unit; optional, 1.0 when absent.
+    #[serde(default = "unzoomed")]
+    pub zoom: f64,
+}
+
+fn unzoomed() -> f64 {
+    1.0
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            zoom: unzoomed(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -102,6 +122,9 @@ impl Layout {
             return Err(LayoutError(
                 "view coordinates must be finite with magnitude at most 1,000,000",
             ));
+        }
+        if !(MIN_ZOOM..=MAX_ZOOM).contains(&self.view.zoom) {
+            return Err(LayoutError("view zoom must be from 0.25 to 2"));
         }
         if self.cards.len() > MAX_CARDS {
             return Err(LayoutError("a layout holds at most 256 cards"));

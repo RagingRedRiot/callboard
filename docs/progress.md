@@ -1048,6 +1048,36 @@ themes.
   quiet listing, validation, IDs, notices), `callboard/tests/watches.rs`
   (every route's status and shape, CLI exit codes), and four GUI tests.
 
+## Canvas zoom (#10)
+
+- The canvas zooms from 25% to 200% (DESIGN.md §6.1): Ctrl + wheel and pinch
+  around the pointer (the fingers' centre on a touchscreen), anywhere on the
+  canvas; Ctrl + Up/Down around the middle when no text field has focus; a
+  zoom indicator in the layout bar that resets to 100%. Ctrl + =/-/0 stay
+  egui's whole-window scale, for text size; it is not saved across starts.
+- Zoom never sets a card's size: new cards are sized as at 100%, and resize
+  grips keep their screen width. The dot grid thins as it zooms out.
+- Layouts store the zoom as an optional `view.zoom` (default 1, validated to
+  0.25–2), saved in whole percent with the same one-second pause as panning.
+- Cards draw in canvas units on their own `egui::Area` layer with a layer
+  transform, so egui scales graphics, hit-testing, drag deltas, and popup
+  anchors; the pan surface lives on that layer too. Menus and item details are
+  other layers and stay at 100%. AccessKit bounds are scaled by a transform on
+  the layer's container node. Code comparing raw pointer positions with card
+  rects (drop targets, reorder, keep-in-place handles, sidebar drops) converts
+  between screen and layer coordinates.
+- Revealing a card keeps the zoom unless the card would not fit, then zooms
+  out just enough; **Show all** zooms out to fit every card, never past 100%.
+- Tests: zoom anchoring, steps, rounding, placement, reveal, and Show all in
+  `workspace`; eight GUI tests (Ctrl + wheel and pinch, keys and indicator,
+  window scale, move/resize/promote/drop and accessibility bounds at 50%,
+  grips at 25%, Show all, details at full size, reveal).
+- The README demo was re-recorded with two more scenes: zooming out with
+  Ctrl+Down and Show all, and a watch flagging a changed ticket that is then
+  acknowledged.
+- Open: cards are unreadable at the lowest zoom; a simplified overview
+  rendering is listed in DESIGN.md §12.
+
 ## Suggested next
 
 Polish from real use with a real tracking script (a GitHub query feed).

@@ -454,15 +454,29 @@ canvas are shown but disabled in **Show…**.
 
 The canvas is unbounded and pans: drag empty canvas, or scroll the wheel or
 trackpad over empty canvas (Shift + wheel pans horizontally). Over a card, the
-wheel scrolls that card's contents. There is no zoom. Resizing the window shows
-more or less of the canvas and never moves cards. **Show all** pans so the
-top-left of the cards' bounding box is in view, recovering cards panned out of
-sight.
+wheel scrolls that card's contents. Resizing the window shows more or less of
+the canvas and never moves cards.
+
+The canvas zooms from 25% to 200%. Ctrl + wheel and trackpad pinch zoom
+anywhere on the canvas, including over a card, around the pointer; Ctrl + Up
+and Ctrl + Down step through fixed levels around the middle of the view
+(except in a text field, where they move the cursor). The layout bar shows the
+zoom (for example "75%"); clicking it resets to 100%. Ctrl + =, Ctrl + -, and
+Ctrl + 0 scale the whole window instead (sidebar, dialogs, and cards alike),
+for reading comfort; that scale is not saved.
+Zoom changes only how cards are drawn: moving, resizing, collapsing, and
+dropping onto a card work the same at any zoom, and sizes and positions stay
+in canvas units (§6.4). A new card gets the same size at any zoom; zoomed in
+too far to show all of it, its top-left is placed in view. Menus and item details open at 100% so they stay
+readable, and accessibility bounds report where cards are drawn. **Show all**
+zooms out as needed (never in past 100%) so every card fits, and pans to the
+top-left of their bounding box, recovering cards panned out of sight.
 
 A sidebar lists every feed, watch, and board with item counts and error/stale
 markers.
 Clicking an entry reveals its card (panning to it, bringing it to the front, and
-expanding it if collapsed) or, when it has none, places a new card in the middle
+expanding it if collapsed; the zoom is kept unless the card would not fit, and
+then it zooms out just enough to show it) or, when it has none, places a new card in the middle
 of the view, offset from any card already there. **Add card…** offers the same.
 Dragging an entry onto the canvas places its card at the drop point.
 
@@ -542,9 +556,10 @@ pressing Escape, cancels. The deleted-board archive card accepts no drops.
 
 A layout is the arrangement of cards on the canvas: each card's target,
 position, size, and collapsed state, the cards' front-to-back order, and the
-canvas view position. The GUI saves changes to the active layout through the
-API as they happen, after a one-second pause, so a drag or resize saves once
-when it ends; panning and bringing a card to the front are saved the same way.
+canvas view position and zoom. The GUI saves changes to the active layout
+through the API as they happen, after a one-second pause, so a drag or resize
+saves once when it ends; panning, zooming, and bringing a card to the front are
+saved the same way.
 The user can keep several named layouts — one per project or kind of day — and
 switch between them. Switching layouts never changes feeds or boards.
 
@@ -578,7 +593,7 @@ A layout body:
 
 ```json
 {
-  "view": {"x": -40, "y": 0},
+  "view": {"x": -40, "y": 0, "zoom": 0.75},
   "cards": [
     {"target": {"kind": "feed", "name": "reviews"},
      "x": 0, "y": 0, "width": 420, "height": 560, "collapsed": false},
@@ -590,7 +605,8 @@ A layout body:
 
 Coordinates are canvas units (the GUI's logical pixels at 100% scale), with y
 increasing downward. `view` is the canvas point shown at the top-left of the
-canvas area. `cards` is ordered back to front: the last card is drawn on top.
+canvas area; its optional `zoom` (screen points per canvas unit, 0.25 to 2,
+default 1) is the scale it is shown at. `cards` is ordered back to front: the last card is drawn on top.
 Targets are `{"kind":"feed","name":...}`, `{"kind":"watch","name":...}`, or
 `{"kind":"board","id":...}` with a user board ID greater than 1. `height` is the expanded height, kept while a card
 is collapsed. An empty layout has no cards.
@@ -598,7 +614,7 @@ is collapsed. An empty layout has no cards.
 Unknown fields, invalid targets, and duplicate targets are rejected.
 Coordinates must be finite with magnitude at most 1,000,000; widths and heights
 must be finite, from 1 to 100,000 (the GUI enlarges cards below its minimum
-size when displaying them). A layout holds at most 256 cards, and save bodies
+size when displaying them); a zoom must be from 0.25 to 2. A layout holds at most 256 cards, and save bodies
 are limited to 64 KiB. Targets are validated syntactically, not checked for
 existence. Invalid saves preserve the previous layout. Saving layouts does not
 mutate feeds or boards, and target deletion does not modify stored layouts.
@@ -1170,8 +1186,10 @@ services, XDG base directories, and a Wayland or X11 desktop for the GUI.
   feature; callboard's change summary is already shaped for it.
 - **Free-form note placement.** Notes are ordered sticky notes inside a board
   card; placing them freely is possible later.
-- **Canvas zoom and snapping.** Zooming out for an overview, and snapping cards
-  to each other's edges, can be added without changing the layout format.
+- **Canvas snapping.** Snapping cards to each other's edges can be added
+  without changing the layout format.
+- **Overview rendering.** Zoomed far out, cards could draw as their title bar
+  and counts only, like collapsed cards, so they stay legible.
 - **Due dates.** Whether todos carry due dates, and whether cued reminders are
   created for them. callboard itself stays silent (§1).
 - **Search** across feeds, todos, and notes.

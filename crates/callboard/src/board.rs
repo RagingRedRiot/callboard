@@ -173,14 +173,29 @@ fn keep_in_place_id() -> egui::Id {
     egui::Id::new("callboard_keep_in_place")
 }
 
-/// Record a visible handle that does not raise `card` when pressed.
+/// Record a visible handle that does not raise `card` when pressed. The
+/// rect is kept in screen coordinates, as the zoomed canvas draws it.
 pub(crate) fn keep_in_place(ui: &egui::Ui, rect: egui::Rect, card: &Target) {
     let rect = rect.intersect(ui.clip_rect());
+    let rect = ui
+        .ctx()
+        .layer_transform_to_global(ui.layer_id())
+        .map_or(rect, |to_global| to_global * rect);
     ui.ctx().data_mut(|d| {
         d.get_temp_mut_or_default::<KeepInPlace>(keep_in_place_id())
             .0
             .push((rect, card.clone()))
     });
+}
+
+/// The pointer in the coordinates `ui` draws in, which the canvas zoom scales.
+pub(crate) fn pointer_in(ui: &egui::Ui) -> Option<egui::Pos2> {
+    let pos = ui.ctx().pointer_interact_pos()?;
+    Some(
+        ui.ctx()
+            .layer_transform_from_global(ui.layer_id())
+            .map_or(pos, |from_global| from_global * pos),
+    )
 }
 
 /// The handles recorded since the last call (the previous frame's).
@@ -885,7 +900,7 @@ fn promote_drop(
     let Some(drag) = egui::DragAndDrop::payload::<FeedDrag>(ui.ctx()) else {
         return;
     };
-    let Some(pointer) = ui.ctx().pointer_interact_pos() else {
+    let Some(pointer) = pointer_in(ui) else {
         return;
     };
     let (kind, list) = if notes.contains(pointer) {
@@ -975,7 +990,7 @@ pub(crate) fn reorder_drop(
     from: usize,
     grip: &egui::Response,
 ) -> Option<usize> {
-    let pointer = ui.ctx().pointer_interact_pos()?;
+    let pointer = pointer_in(ui)?;
     if !ui.clip_rect().contains(pointer) {
         return None;
     }

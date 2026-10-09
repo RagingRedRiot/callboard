@@ -50,8 +50,13 @@ targets that already have a card are disabled. A long feed scrolls inside its ca
 ## Navigating
 
 Drag empty canvas, or use the wheel over it (Shift + wheel for horizontal), to
-pan; over a card, the wheel scrolls that card. **Show all** in the layout menu
-pans back to the cards. Clicking a sidebar entry pans to its card or places a
+pan; over a card, the wheel scrolls that card. Ctrl + wheel or a trackpad pinch
+zooms the canvas (25%–200%) around the pointer, even over a card; Ctrl + Up and
+Ctrl + Down step the zoom, and clicking the zoom shown in the top bar resets
+it. Ctrl + = and Ctrl + - make the whole window larger or smaller (text,
+sidebar, and dialogs too), and Ctrl + 0 resets that. Each layout remembers its own zoom. Menus and item details stay
+at 100%. **Show all** in the layout menu zooms out as needed and pans back to
+the cards. Clicking a sidebar entry pans to its card or places a
 new one in the middle of the view; **Add card…** offers the same, the
 right-click menu can also remove a card, and dragging an entry onto the canvas
 places its card at the drop point. The sidebar lists saved layouts, feeds and watches with

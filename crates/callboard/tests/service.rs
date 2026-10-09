@@ -877,7 +877,7 @@ async fn layout_api_saves_replaces_and_rejects_invalid_requests_atomically() {
         {"target":{"kind":"feed","name":"missing"},"x":0.0,"y":0.0,"width":420.0,"height":560.0,"collapsed":false},
         {"target":{"kind":"board","id":999},"x":440.0,"y":-20.0,"width":360.0,"height":300.0,"collapsed":true}
     ]);
-    let body = json!({"view":{"x":-40.0,"y":10.0},"cards":cards});
+    let body = json!({"view":{"x":-40.0,"y":10.0,"zoom":0.75},"cards":cards});
     let (status, saved) = f.api("PUT", path, body.clone()).await;
     assert_eq!(status, 200, "{saved}");
     assert_eq!(saved["name"], "Work / day");
@@ -891,6 +891,7 @@ async fn layout_api_saves_replaces_and_rejects_invalid_requests_atomically() {
         json!({"view":{"x":0,"y":0},"cards":[card(json!({"kind":"board","id":1}))]}),
         json!({"view":{"x":0,"y":0},"cards":[card(feed.clone()), card(feed.clone())]}),
         json!({"view":{"x":2e6,"y":0},"cards":[]}),
+        json!({"view":{"x":0,"y":0,"zoom":3},"cards":[]}),
         json!({"view":{"x":0,"y":0},"cards":[],"extra":1}),
     ] {
         assert_eq!(f.api("PUT", path, invalid).await.0, 400);

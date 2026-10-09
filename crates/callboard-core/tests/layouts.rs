@@ -18,7 +18,11 @@ fn feed(name: &str) -> Target {
 
 fn layout(cards: Vec<Card>) -> Layout {
     Layout {
-        view: View { x: -40.0, y: 0.0 },
+        view: View {
+            x: -40.0,
+            y: 0.0,
+            zoom: 1.0,
+        },
         cards,
     }
 }
@@ -30,7 +34,7 @@ fn leaf() -> Layout {
 #[test]
 fn parses_the_documented_body_and_rejects_unknown_or_missing_fields() {
     let body = json!({
-        "view": {"x": -40.0, "y": 0.0},
+        "view": {"x": -40.0, "y": 0.0, "zoom": 0.75},
         "cards": [
             {"target": {"kind": "feed", "name": "reviews"},
              "x": 0.0, "y": 0.0, "width": 420.0, "height": 560.0, "collapsed": false},
@@ -45,7 +49,9 @@ fn parses_the_documented_body_and_rejects_unknown_or_missing_fields() {
     // Integer coordinates, as in DESIGN.md, parse too.
     let integers = json!({"view":{"x":-40,"y":0},"cards":[{"target":{"kind":"board","id":2},
         "x":0,"y":0,"width":420,"height":560,"collapsed":false}]});
-    assert!(serde_json::from_value::<Layout>(integers).is_ok());
+    let integers: Layout = serde_json::from_value(integers).unwrap();
+    // Without a zoom, the view is at 100%.
+    assert_eq!(integers.view.zoom, 1.0);
 
     let with = |edit: fn(&mut Value)| {
         let mut value = body.clone();
@@ -107,6 +113,18 @@ fn validates_targets_geometry_duplicates_and_card_count_at_the_boundaries() {
     assert!(!valid(&view));
     view.view.x = -MAX_COORDINATE - 1.0;
     assert!(!valid(&view));
+    view.view.x = 0.0;
+    for (zoom, ok) in [
+        (MIN_ZOOM, true),
+        (MAX_ZOOM, true),
+        (MIN_ZOOM - 0.01, false),
+        (MAX_ZOOM + 0.01, false),
+        (0.0, false),
+        (f64::NAN, false),
+    ] {
+        view.view.zoom = zoom;
+        assert_eq!(valid(&view), ok, "zoom {zoom}");
+    }
 
     // One card per feed or board; a feed and a board never collide.
     assert!(!valid(&layout(vec![
