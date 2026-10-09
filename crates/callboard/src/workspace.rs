@@ -1,13 +1,13 @@
 //! Card arrangement on the canvas and named layouts (DESIGN.md §6.1, §6.4).
 //!
 //! A [`Canvas`] holds cards in canvas units, back to front, and the view
-//! offset; it converts to and from the service's toolkit-independent
+//! offset and zoom; it converts to and from the service's toolkit-independent
 //! [`Layout`]. Each named layout has a working copy; arrangement changes
 //! auto-save to it (§6.4). The Unsaved arrangement has no name until
 //! "Save as…".
 use crate::backend::Target;
 use callboard_core::layout::{self, Layout, NamedLayout, View};
-use eframe::egui::{self, Pos2, Rect, Vec2};
+use eframe::egui::{self, Pos2, Rect, Vec2, emath::TSTransform};
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::{Duration, Instant},
@@ -22,8 +22,13 @@ pub const TITLE_HEIGHT: f32 = 34.0;
 /// Offset between cards placed at nearly the same spot: more than a title
 /// bar, so the card underneath keeps its title and buttons in view.
 pub const CASCADE: f32 = TITLE_HEIGHT + 6.0;
-/// Space kept between a revealed card and the edge of the view.
+/// Space kept between a revealed card and the edge of the view, in screen
+/// points.
 pub const MARGIN: f32 = 24.0;
+pub const MIN_ZOOM: f32 = layout::MIN_ZOOM as f32;
+pub const MAX_ZOOM: f32 = layout::MAX_ZOOM as f32;
+/// The levels Ctrl+= and Ctrl+- step through.
+const ZOOM_STEPS: [f32; 11] = [0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 2.0];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CardState {
@@ -52,6 +57,8 @@ pub struct Canvas {
     pub id: egui::Id,
     /// The canvas point shown at the top-left of the canvas area.
     pub view: Pos2,
+    /// Screen points per canvas unit, from [`MIN_ZOOM`] to [`MAX_ZOOM`].
+    pub zoom: f32,
     /// Back to front.
     pub cards: Vec<CardState>,
 }
@@ -61,6 +68,7 @@ impl Canvas {
         Self {
             id,
             view: Pos2::ZERO,
+            zoom: 1.0,
             cards: Vec::new(),
         }
     }
@@ -85,18 +93,21 @@ impl Canvas {
         Self {
             id,
             view: Pos2::new(layout.view.x as f32, layout.view.y as f32),
+            zoom: (layout.view.zoom as f32).clamp(MIN_ZOOM, MAX_ZOOM),
             cards,
         }
     }
 
     /// The service form. Archive cards are omitted; coordinates are whole
-    /// canvas units, so sub-pixel drag noise is never a change.
+    /// canvas units and the zoom whole percent, so sub-pixel drag or pinch
+    /// noise is never a change.
     pub fn to_layout(&self) -> Layout {
         let unit = |v: f32| f64::from(v.round());
         Layout {
             view: View {
                 x: unit(self.view.x),
                 y: unit(self.view.y),
+                zoom: (f64::from(self.zoom) * 100.0).round() / 100.0,
             },
             cards: self
                 .cards
@@ -157,7 +168,38 @@ impl Canvas {
         true
     }
 
-    /// Bring a placed card to the front, expand it, and pan it into view.
+    /// How canvas units map to screen points when the canvas area's
+    /// top-left is at `origin`.
+    pub fn to_screen(&self, origin: Pos2) -> TSTransform {
+        TSTransform::new(
+            origin.to_vec2() - self.view.to_vec2() * self.zoom,
+            self.zoom,
+        )
+    }
+
+    /// Set the zoom, keeping the canvas point under `anchor` (screen points
+    /// from the canvas area's top-left) in place.
+    pub fn zoom_at(&mut self, zoom: f32, anchor: Vec2) {
+        let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        if zoom.is_finite() && zoom != self.zoom {
+            self.view += anchor / self.zoom - anchor / zoom;
+            self.zoom = zoom;
+        }
+    }
+
+    /// The next zoom level in (`steps > 0`) or out from the current zoom.
+    pub fn zoom_step(&self, steps: i32) -> f32 {
+        let current = self.zoom;
+        let level = if steps > 0 {
+            ZOOM_STEPS.iter().find(|&&z| z > current + 0.001)
+        } else {
+            ZOOM_STEPS.iter().rev().find(|&&z| z < current - 0.001)
+        };
+        level.copied().unwrap_or(current)
+    }
+
+    /// Bring a placed card to the front, expand it, and pan it into view,
+    /// zooming out first if it would not fit.
     pub fn reveal(&mut self, target: &Target, viewport: Vec2) -> bool {
         if !self.raise(target) {
             return false;
@@ -165,6 +207,10 @@ impl Canvas {
         let card = self.cards.last_mut().expect("raised");
         card.collapsed = false;
         let rect = card.rect;
+        let fit = fit_zoom(rect.size(), viewport);
+        if fit < self.zoom {
+            self.zoom_at(fit, viewport / 2.0);
+        }
         self.pan_into_view(rect, viewport);
         true
     }
@@ -172,24 +218,29 @@ impl Canvas {
     /// Pan by the least amount that shows `rect` with a margin; a rect too
     /// big for the view is aligned at its top-left.
     fn pan_into_view(&mut self, rect: Rect, viewport: Vec2) {
+        let extent = viewport / self.zoom;
+        let margin = MARGIN / self.zoom;
         let axis = |view: f32, min: f32, max: f32, extent: f32| {
-            if max - min + 2.0 * MARGIN > extent || min - MARGIN < view {
-                min - MARGIN
-            } else if max + MARGIN > view + extent {
-                max + MARGIN - extent
+            if max - min + 2.0 * margin > extent || min - margin < view {
+                min - margin
+            } else if max + margin > view + extent {
+                max + margin - extent
             } else {
                 view
             }
         };
         self.view = Pos2::new(
-            axis(self.view.x, rect.min.x, rect.max.x, viewport.x),
-            axis(self.view.y, rect.min.y, rect.max.y, viewport.y),
+            axis(self.view.x, rect.min.x, rect.max.x, extent.x),
+            axis(self.view.y, rect.min.y, rect.max.y, extent.y),
         );
     }
 
     /// Reveal the target's card, or place a new one: at `at` (canvas units,
     /// its top-left) or centred in the view, cascaded off any card whose
     /// title bar it would cover. Never adds a second card for a target.
+    ///
+    /// The new card is sized as at 100%, whatever the zoom; zoomed in too far
+    /// to show all of it, its top-left is shown.
     pub fn place(&mut self, target: Target, at: Option<Pos2>, viewport: Vec2) {
         if self.reveal(&target, viewport) {
             return;
@@ -197,8 +248,21 @@ impl Canvas {
         let size = DEFAULT_CARD
             .min(viewport - Vec2::splat(2.0 * MARGIN))
             .max(MIN_CARD);
+        let (extent, margin) = (viewport / self.zoom, MARGIN / self.zoom);
+        let axis = |view: f32, size: f32, extent: f32| {
+            if size + 2.0 * margin > extent {
+                view + margin
+            } else {
+                view + (extent - size) / 2.0
+            }
+        };
         let mut min = at
-            .unwrap_or_else(|| self.view + (viewport - size) / 2.0)
+            .unwrap_or_else(|| {
+                Pos2::new(
+                    axis(self.view.x, size.x, extent.x),
+                    axis(self.view.y, size.y, extent.y),
+                )
+            })
             .round();
         while self.cards.iter().any(|c| {
             let offset = c.rect.min - min;
@@ -255,17 +319,26 @@ impl Canvas {
         self.view += delta;
     }
 
-    /// Pan so the top-left of the cards' bounding box is in view.
-    pub fn show_all(&mut self) {
+    /// Zoom to fit every card in view, never past 100%, and pan to the
+    /// top-left of their bounding box.
+    pub fn show_all(&mut self, viewport: Vec2) {
         if let Some(bounds) = self
             .cards
             .iter()
             .map(CardState::shown)
             .reduce(|a, b| a.union(b))
         {
-            self.view = bounds.min - Vec2::splat(MARGIN);
+            self.zoom = fit_zoom(bounds.size(), viewport).min(1.0);
+            self.view = bounds.min - Vec2::splat(MARGIN / self.zoom);
         }
     }
+}
+
+/// The largest zoom that shows `size` canvas units with a margin on every
+/// side, within the zoom range.
+fn fit_zoom(size: Vec2, viewport: Vec2) -> f32 {
+    let room = viewport - Vec2::splat(2.0 * MARGIN);
+    (room / size).min_elem().clamp(MIN_ZOOM, MAX_ZOOM)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -834,10 +907,88 @@ mod tests {
         // a is now off to the left: its left edge comes into view.
         assert!(canvas.reveal(&feed("a"), VIEWPORT));
         assert_eq!(canvas.view, Pos2::new(-MARGIN, 0.0));
-        // Too tall for the view: aligned at its top.
-        assert!(canvas.reveal(&feed("a"), Vec2::new(1000.0, 300.0)));
-        assert_eq!(canvas.view.y, 100.0 - MARGIN);
+        assert_eq!(canvas.zoom, 1.0, "fits, so the zoom is kept");
+        // Too tall for the view: zoomed out just enough to show all of it.
+        let short = Vec2::new(1000.0, 300.0);
+        assert!(canvas.reveal(&feed("a"), short));
+        assert_eq!(canvas.zoom, (300.0 - 2.0 * MARGIN) / 520.0);
+        let shown = canvas.to_screen(Pos2::ZERO) * canvas.card(&feed("a")).unwrap().rect;
+        let view = Rect::from_min_size(Pos2::ZERO, short);
+        assert!(view.shrink(MARGIN - 0.01).contains_rect(shown), "{shown:?}");
+        // Too big even at the smallest zoom: aligned at its top-left.
+        assert!(canvas.reveal(&feed("a"), Vec2::new(100.0, 100.0)));
+        assert_eq!(canvas.zoom, MIN_ZOOM);
+        assert_eq!(
+            canvas.view,
+            Pos2::new(0.0, 100.0) - Vec2::splat(MARGIN / MIN_ZOOM)
+        );
         assert!(!canvas.reveal(&feed("missing"), VIEWPORT));
+    }
+
+    #[test]
+    fn zooming_keeps_the_anchor_in_place_within_the_range() {
+        let mut canvas = Canvas::new(egui::Id::new("c"));
+        canvas.view = Pos2::new(100.0, 50.0);
+        let anchor = Vec2::new(300.0, 200.0);
+        let under = |c: &Canvas| c.to_screen(Pos2::ZERO).inverse() * anchor.to_pos2();
+        let before = under(&canvas);
+        canvas.zoom_at(0.5, anchor);
+        assert_eq!(canvas.zoom, 0.5);
+        assert_eq!(under(&canvas), before);
+        // Clamped to the range, still around the anchor.
+        canvas.zoom_at(10.0, anchor);
+        assert_eq!(canvas.zoom, MAX_ZOOM);
+        assert!((under(&canvas) - before).length() < 0.001);
+        canvas.zoom_at(0.0, anchor);
+        assert_eq!(canvas.zoom, MIN_ZOOM);
+        canvas.zoom_at(f32::NAN, anchor);
+        assert_eq!(canvas.zoom, MIN_ZOOM, "ignored");
+
+        // Keyboard steps go to the next level, from any zoom.
+        canvas.zoom = 1.0;
+        assert_eq!(canvas.zoom_step(1), 1.1);
+        assert_eq!(canvas.zoom_step(-1), 0.9);
+        canvas.zoom = 0.8;
+        assert_eq!((canvas.zoom_step(1), canvas.zoom_step(-1)), (0.9, 0.75));
+        canvas.zoom = MAX_ZOOM;
+        assert_eq!(canvas.zoom_step(1), MAX_ZOOM);
+        canvas.zoom = MIN_ZOOM;
+        assert_eq!(canvas.zoom_step(-1), MIN_ZOOM);
+    }
+
+    #[test]
+    fn the_zoom_is_saved_in_whole_percent_and_clamped_on_load() {
+        let mut canvas = Canvas::from_layout(egui::Id::new("c"), &one("a"));
+        assert_eq!(canvas.zoom, 1.0, "absent means 100%");
+        canvas.zoom_at(0.7534, Vec2::ZERO);
+        assert_eq!(canvas.to_layout().view.zoom, 0.75);
+        // A pinch that ends where it began is not a change.
+        canvas.zoom_at(1.0001, Vec2::ZERO);
+        assert_eq!(canvas.to_layout(), one("a"));
+
+        let mut far = one("a");
+        far.view.zoom = 9.0;
+        assert_eq!(Canvas::from_layout(egui::Id::NULL, &far).zoom, MAX_ZOOM);
+    }
+
+    #[test]
+    fn the_zoom_never_changes_the_size_of_a_new_card() {
+        let mut canvas = Canvas::new(egui::Id::new("c"));
+        canvas.zoom = 0.5;
+        canvas.place(feed("a"), None, VIEWPORT);
+        let rect = canvas.cards[0].rect;
+        assert_eq!(rect.size(), DEFAULT_CARD);
+        assert_eq!(rect.center(), (VIEWPORT / 0.5 / 2.0).to_pos2().round());
+        // Zoomed in, a card too tall for the view keeps its size and shows
+        // its top; across, it still fits and is centred.
+        let mut close = Canvas::new(egui::Id::new("z"));
+        close.zoom = 2.0;
+        close.place(feed("a"), None, VIEWPORT);
+        let rect = close.cards[0].rect;
+        assert_eq!(rect.size(), DEFAULT_CARD);
+        assert_eq!(rect.min.y, MARGIN / 2.0);
+        assert_eq!(rect.center().x, 250.0);
+        assert_eq!(close.zoom, 2.0, "placing never zooms");
     }
 
     #[test]
@@ -879,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn show_all_pans_to_the_top_left_of_every_card() {
+    fn show_all_zooms_out_to_fit_and_pans_to_every_card() {
         let mut canvas = Canvas::from_layout(
             egui::Id::new("c"),
             &cards(&[
@@ -889,12 +1040,37 @@ mod tests {
         );
         canvas.move_by(&feed("b"), Vec2::new(0.0, -300.0));
         canvas.pan_by(Vec2::new(5000.0, 5000.0));
-        canvas.show_all();
+        // The cards (920 by 820) fit a tall view at 100%; it never zooms in
+        // further.
+        canvas.zoom = 0.5;
+        canvas.show_all(Vec2::new(1000.0, 900.0));
+        assert_eq!(canvas.zoom, 1.0);
         assert_eq!(canvas.view, Pos2::new(-MARGIN, -200.0 - MARGIN));
+        // A smaller view zooms out until they fit, margin included.
+        let small = Vec2::new(500.0, 400.0);
+        canvas.show_all(small);
+        assert_eq!(canvas.zoom, (400.0 - 2.0 * MARGIN) / 820.0);
+        let bounds = canvas.cards[0].rect.union(canvas.cards[1].rect);
+        let shown = canvas.to_screen(Pos2::ZERO) * bounds;
+        let view = Rect::from_min_size(Pos2::ZERO, small);
+        assert!(view.shrink(MARGIN - 0.01).contains_rect(shown), "{shown:?}");
+        // Spread too far for the smallest zoom: the top-left is shown.
+        canvas.move_by(&feed("b"), Vec2::new(100_000.0, 0.0));
+        canvas.show_all(VIEWPORT);
+        assert_eq!(canvas.zoom, MIN_ZOOM);
+        assert_eq!(
+            canvas.view,
+            Pos2::new(0.0, -200.0) - Vec2::splat(MARGIN / MIN_ZOOM)
+        );
+
         let mut empty = Canvas::new(egui::Id::new("e"));
         empty.pan_by(Vec2::new(7.0, 7.0));
-        empty.show_all();
-        assert_eq!(empty.view, Pos2::new(7.0, 7.0), "nothing to show");
+        empty.show_all(VIEWPORT);
+        assert_eq!(
+            (empty.view, empty.zoom),
+            (Pos2::new(7.0, 7.0), 1.0),
+            "nothing to show"
+        );
     }
 
     #[test]

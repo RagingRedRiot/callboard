@@ -16,7 +16,7 @@ Scripts post what they find. callboard tracks what's new, and keeps it on a canv
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/demo-dark.gif">
-  <img alt="A script runs callboard put and a new pull request appears live in the review feed; its details show on hover, it is dragged onto the Inbox board as a todo, a todo is ticked, a nightly build turns green, and Ctrl+K jumps back to the Inbox after panning away" src="docs/assets/demo-light.gif" width="100%">
+  <img alt="A script runs callboard put and a new pull request appears live in the review feed; its details show on hover, it is dragged onto the Inbox board as a todo, a todo is ticked, a nightly build turns green, and Ctrl+K jumps back to the Inbox after panning away. The canvas then zooms out until every card fits, bringing a watch of support tickets into view; a script reports that one ticket changed, it is flagged as needing attention, acknowledged, and the zoom is reset to 100%" src="docs/assets/demo-light.gif" width="100%">
 </picture>
 
 Anything a script can fetch can be a feed: pull requests waiting on you, last
@@ -34,8 +34,9 @@ and save.
   unchanged too long turn quiet.
 - **Boards for the rest.** Todos and notes, with colors, archives, and promotion
   from any feed item in one drag.
-- **A canvas you arrange.** Cards overlap, resize, and collapse; layouts save
-  automatically, and Ctrl+K finds any feed, watch, board, or layout.
+- **A canvas you arrange.** Cards overlap, resize, and collapse; zoom out for
+  the whole picture and back in to work. Layouts save automatically, zoom
+  included, and Ctrl+K finds any feed, watch, board, or layout.
 - **Live everywhere.** Every write reaches every open window at once, from the
   CLI, a script, or another window.
 - **Private to your account.** A per-user service on a Unix socket checks each

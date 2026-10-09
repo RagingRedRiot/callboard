@@ -301,9 +301,17 @@ pub enum Action {
         target: Target,
         op: CardOp,
     },
+    /// Pan by `delta` canvas units.
     Pan {
         canvas: egui::Id,
         delta: egui::Vec2,
+    },
+    /// Zoom to `zoom` (clamped to the range), keeping the canvas point at
+    /// `anchor` (screen points from the canvas area's top-left) in place.
+    Zoom {
+        canvas: egui::Id,
+        zoom: f32,
+        anchor: egui::Vec2,
     },
     ShowAll,
     Switch(LayoutKey),
@@ -1234,8 +1242,13 @@ impl App {
                 }
             },
             Action::Pan { canvas: id, delta } if id == canvas.id => canvas.pan_by(delta),
-            Action::Card { .. } | Action::Pan { .. } => (),
-            Action::ShowAll => canvas.show_all(),
+            Action::Zoom {
+                canvas: id,
+                zoom,
+                anchor,
+            } if id == canvas.id => canvas.zoom_at(zoom, anchor),
+            Action::Card { .. } | Action::Pan { .. } | Action::Zoom { .. } => (),
+            Action::ShowAll => canvas.show_all(viewport),
             Action::Switch(key) => self.layouts.switch(key),
             Action::Revert => self.layouts.revert(),
             Action::Refresh => self.scheduler.refresh_all(),
@@ -1390,6 +1403,10 @@ impl App {
         if !dialog && ui.input_mut(|i| i.consume_shortcut(&quick::SHORTCUT)) {
             actions.push(Action::QuickOpen);
         }
+        // Ctrl+=, Ctrl+- and Ctrl+0 are egui's: they scale the whole window.
+        if !dialog && let Some(zoom) = self.zoom_shortcut(ui) {
+            actions.push(self.zoom_to(zoom));
+        }
         egui::Panel::top("layout_bar")
             .frame(
                 egui::Frame::new()
@@ -1440,6 +1457,33 @@ impl App {
             for action in actions {
                 self.apply(action);
             }
+        }
+    }
+
+    /// The canvas zoom Ctrl+Up or Ctrl+Down asks for. In a text field they
+    /// keep their meaning there (to the start or end of the text).
+    fn zoom_shortcut(&self, ui: &egui::Ui) -> Option<f32> {
+        if ui.ctx().text_edit_focused() {
+            return None;
+        }
+        let canvas = self.layouts.active();
+        ui.input_mut(|i| {
+            if i.consume_shortcut(&ZOOM_IN) {
+                Some(canvas.zoom_step(1))
+            } else if i.consume_shortcut(&ZOOM_OUT) {
+                Some(canvas.zoom_step(-1))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Zoom the active canvas around the middle of the view.
+    fn zoom_to(&self, zoom: f32) -> Action {
+        Action::Zoom {
+            canvas: self.layouts.active().id,
+            zoom,
+            anchor: self.canvas_area.size() / 2.0,
         }
     }
 
@@ -1579,6 +1623,25 @@ impl App {
             if search.clicked() {
                 actions.push(Action::QuickOpen);
             }
+            ui.add_space(8.0);
+            let percent = (self.layouts.active().zoom * 100.0).round();
+            let zoom = ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new(format!("{percent}%"))
+                            .size(12.0)
+                            .color(p.muted),
+                    )
+                    .frame(false)
+                    .min_size(egui::vec2(44.0, 26.0)),
+                )
+                .on_hover_text(
+                    "Canvas zoom: Ctrl+wheel, pinch, or Ctrl+Up and Ctrl+Down. Click to reset to 100%.",
+                );
+            theme::name(&zoom, &format!("Zoom {percent}%"));
+            if zoom.clicked() {
+                actions.push(self.zoom_to(1.0));
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let refresh = ui.add_enabled_ui(!self.scheduler.busy(), |ui| {
                     theme::icon_button(
@@ -1699,7 +1762,7 @@ impl App {
                 !self.layouts.active().cards.is_empty(),
                 egui::Button::new("Show all"),
             )
-            .on_hover_text("Pan to the cards, including any panned out of sight")
+            .on_hover_text("Zoom out as needed and pan to show every card")
             .clicked()
         {
             actions.push(Action::ShowAll);
@@ -2096,7 +2159,8 @@ impl App {
             && self.canvas_area.contains(pos)
         {
             // The pointer lands on the new card's title bar.
-            let at = self.layouts.active().view + (pos - self.canvas_area.min)
+            let canvas = self.layouts.active();
+            let at = canvas.to_screen(self.canvas_area.min).inverse() * pos
                 - egui::vec2(DROP_GRAB.x, DROP_GRAB.y);
             actions.push(Action::PlaceAt(target.clone(), at.round()));
         }
@@ -2179,20 +2243,22 @@ impl App {
     pub fn card_screen_rect(&self, target: &Target) -> Option<egui::Rect> {
         let canvas = self.layouts.active();
         let card = canvas.card(target)?;
-        Some(
-            card.shown()
-                .translate(self.canvas_area.min.to_vec2() - canvas.view.to_vec2()),
-        )
+        Some(canvas.to_screen(self.canvas_area.min) * card.shown())
     }
 
     /// The canvas: cards drawn back to front, clipped to the central area.
     /// Nothing changes while drawing; every change is an action.
+    ///
+    /// Cards are drawn in canvas units on their own layer, which egui scales
+    /// by the zoom: it maps their graphics, hit-testing, drag deltas, and
+    /// popup anchors to the screen. Menus and item details open on other
+    /// layers, so they stay at 100%.
     fn canvas(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let area = ui.max_rect();
         self.canvas_area = area;
         let canvas = self.layouts.active();
-        let offset = area.min.to_vec2() - canvas.view.to_vec2();
-        let screen = |card: &CardState| card.shown().translate(offset);
+        let to_screen = canvas.to_screen(area.min);
+        let screen = |card: &CardState| to_screen * card.shown();
         let topmost_at = |pos: egui::Pos2| {
             area.contains(pos)
                 .then(|| canvas.cards.iter().rposition(|c| screen(c).contains(pos)))
@@ -2233,19 +2299,7 @@ impl App {
             }
         }
 
-        // Registered first, so every card widget sits above it.
-        dot_grid(ui, area, canvas.view);
-        let background = ui.interact(
-            area,
-            ui.id().with(("canvas", canvas.id)),
-            egui::Sense::click_and_drag(),
-        );
-        if background.dragged() && background.drag_delta() != egui::Vec2::ZERO {
-            actions.push(Action::Pan {
-                canvas: canvas.id,
-                delta: -background.drag_delta(),
-            });
-        }
+        dot_grid(ui, area, canvas.view, canvas.zoom);
         if canvas.cards.is_empty() {
             let p = Palette::of(ui.visuals());
             let rect = egui::Rect::from_center_size(area.center(), egui::vec2(420.0, 120.0));
@@ -2265,26 +2319,98 @@ impl App {
             );
         }
 
-        let under = ui.input(|i| i.pointer.hover_pos()).and_then(topmost_at);
+        let hover = ui.input(|i| i.pointer.hover_pos());
+        let under = hover.and_then(topmost_at);
         let front = canvas.cards.len().saturating_sub(1);
-        for (i, card) in canvas.cards.iter().enumerate() {
-            let rect = screen(card);
-            if rect.intersects(area) {
-                self.card(ui, area, card, rect, i == front, under == Some(i), actions);
-            }
-        }
+        // An area, not a bare layer: egui only finds the pointer over a layer
+        // with area state, and scroll areas and hovers inside need that.
+        let local_area = to_screen.inverse() * area;
+        let cards_layer = egui::Area::new(ui.id().with("cards"))
+            .order(ui.layer_id().order)
+            .fixed_pos(local_area.min)
+            .constrain(false)
+            .movable(false)
+            .fade_in(false)
+            .sense(egui::Sense::hover())
+            .show(ui.ctx(), |cards_ui| {
+                cards_ui.set_clip_rect(local_area);
+                cards_ui.expand_to_include_rect(local_area);
+                // Registered first, so every card widget sits above it. On
+                // this layer its drags are already in canvas units.
+                let background = cards_ui.interact(
+                    local_area,
+                    ui.id().with(("canvas", canvas.id)),
+                    egui::Sense::click_and_drag(),
+                );
+                if background.dragged() && background.drag_delta() != egui::Vec2::ZERO {
+                    actions.push(Action::Pan {
+                        canvas: canvas.id,
+                        delta: -background.drag_delta(),
+                    });
+                }
+                // egui reports widget bounds in layer coordinates; scale them
+                // for assistive technology the way the layer is drawn.
+                cards_ui
+                    .ctx()
+                    .accesskit_node_builder(cards_ui.unique_id(), |node| {
+                        let (t, z) = (to_screen.translation, f64::from(to_screen.scaling));
+                        node.set_transform(egui::accesskit::Affine::new([
+                            z,
+                            0.0,
+                            0.0,
+                            z,
+                            t.x.into(),
+                            t.y.into(),
+                        ]));
+                    });
+                for (i, card) in canvas.cards.iter().enumerate() {
+                    let rect = card.shown();
+                    if rect.intersects(local_area) {
+                        self.card(
+                            cards_ui,
+                            local_area,
+                            card,
+                            rect,
+                            i == front,
+                            under == Some(i),
+                            actions,
+                        );
+                    }
+                }
+            })
+            .response
+            .layer_id;
+        ui.ctx().set_sublayer(ui.layer_id(), cards_layer);
+        ui.ctx().set_transform_layer(cards_layer, to_screen);
 
-        // The wheel over empty canvas pans; over a card, its list used it.
-        if under.is_none()
-            && ui
-                .input(|i| i.pointer.hover_pos())
-                .is_some_and(|p| area.contains(p))
+        // Only over the canvas itself, not a menu or dialog covering it.
+        let over_canvas = hover.is_some_and(|pos| {
+            area.contains(pos)
+                && ui
+                    .ctx()
+                    .layer_id_at(pos)
+                    .is_none_or(|layer| layer == ui.layer_id() || layer == cards_layer)
+        });
+        // Ctrl+wheel and pinch zoom anywhere on the canvas, around the
+        // pointer, or around the middle of the fingers on a touchscreen.
+        let (zoom, touch) = ui.input(|i| (i.zoom_delta(), i.multi_touch().map(|t| t.center_pos)));
+        if over_canvas
+            && zoom != 1.0
+            && let Some(pos) = touch.or(hover)
         {
+            actions.push(Action::Zoom {
+                canvas: canvas.id,
+                zoom: canvas.zoom * zoom,
+                anchor: pos - area.min,
+            });
+        }
+        // The wheel over empty canvas pans; over a card, its list used it.
+        if under.is_none() && hover.is_some_and(|p| area.contains(p)) {
             let delta = ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta));
             if delta != egui::Vec2::ZERO {
                 actions.push(Action::Pan {
                     canvas: canvas.id,
-                    delta: -delta,
+                    delta: -delta / canvas.zoom,
                 });
             }
         }
@@ -2429,13 +2555,15 @@ impl App {
         body_ui.set_clip_rect(body.intersect(area));
         self.card_body(&mut body_ui, target, salt, scroll, actions);
 
-        // Resize from the right edge, the bottom edge, and the corner.
-        const GRIP: f32 = 6.0;
+        // Resize from the right edge, the bottom edge, and the corner. The
+        // grips keep their screen size at any zoom.
+        let canvas_zoom = self.layouts.active().zoom;
+        let grip_size = GRIP / canvas_zoom;
         let grips = [
             (
                 "right",
                 egui::Rect::from_min_max(
-                    egui::pos2(rect.max.x - GRIP, rect.min.y + TITLE_HEIGHT),
+                    egui::pos2(rect.max.x - grip_size, rect.min.y + TITLE_HEIGHT),
                     rect.max,
                 ),
                 egui::vec2(1.0, 0.0),
@@ -2443,13 +2571,13 @@ impl App {
             ),
             (
                 "bottom",
-                egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.max.y - GRIP), rect.max),
+                egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.max.y - grip_size), rect.max),
                 egui::vec2(0.0, 1.0),
                 egui::CursorIcon::ResizeVertical,
             ),
             (
                 "corner",
-                egui::Rect::from_min_max(rect.max - egui::Vec2::splat(GRIP * 2.5), rect.max),
+                egui::Rect::from_min_max(rect.max - egui::Vec2::splat(grip_size * 2.5), rect.max),
                 egui::vec2(1.0, 1.0),
                 egui::CursorIcon::ResizeNwSe,
             ),
@@ -2591,6 +2719,16 @@ impl App {
     }
 }
 
+/// Width of a card's resize grips, in screen points.
+const GRIP: f32 = 6.0;
+
+/// Canvas zoom shortcuts. Ctrl+=, Ctrl+- and Ctrl+0 stay egui's, for the
+/// whole window.
+const ZOOM_IN: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::ArrowUp);
+const ZOOM_OUT: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::ArrowDown);
+
 /// Follows the pointer while a sidebar entry is dragged toward the canvas.
 pub(crate) fn drag_ghost(ctx: &egui::Context, pos: egui::Pos2, title: &str) {
     let painter = ctx.layer_painter(egui::LayerId::new(
@@ -2724,20 +2862,27 @@ fn canvas_fill(visuals: &egui::Visuals) -> egui::Color32 {
     Palette::of(visuals).canvas
 }
 
-/// A dot grid that moves with the view, so panning reads as movement.
-fn dot_grid(ui: &egui::Ui, area: egui::Rect, view: egui::Pos2) {
+/// A dot grid that moves and scales with the view, so panning and zooming
+/// read as movement. Zoomed out, it thins to every second, fourth, … dot, so
+/// dots are never closer than three quarters of their spacing at 100%.
+fn dot_grid(ui: &egui::Ui, area: egui::Rect, view: egui::Pos2, zoom: f32) {
     const STEP: f32 = 24.0;
+    let mut units = STEP;
+    while units * zoom < STEP * 0.75 {
+        units *= 2.0;
+    }
+    let step = units * zoom;
     let color = Palette::of(ui.visuals()).grid;
     let painter = ui.painter_at(area);
-    let start = |min: f32, offset: f32| min - offset.rem_euclid(STEP) + STEP / 2.0;
+    let start = |min: f32, offset: f32| min - (offset * zoom).rem_euclid(step) + step / 2.0;
     let mut y = start(area.min.y, view.y);
     while y < area.max.y {
         let mut x = start(area.min.x, view.x);
         while x < area.max.x {
             painter.circle_filled(egui::pos2(x, y), 1.2, color);
-            x += STEP;
+            x += step;
         }
-        y += STEP;
+        y += step;
     }
 }
 

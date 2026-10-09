@@ -2388,3 +2388,228 @@ fn removing_an_item_and_deleting_a_watch_ask_first() {
     ui.finish(ops[0].clone(), Ok(Reply::Done));
     assert!(!ui.order().contains(&Target::Watch("tickets".into())));
 }
+
+// Canvas zoom (DESIGN.md §6.1).
+
+impl Ui {
+    fn zoom(&self) -> f32 {
+        self.canvas().zoom
+    }
+
+    /// The canvas point drawn at a screen position.
+    fn canvas_point(&self, at: Pos2) -> Pos2 {
+        self.canvas()
+            .to_screen(self.app().canvas_area().min)
+            .inverse()
+            * at
+    }
+
+    fn ctrl_wheel(&mut self, at: Pos2, delta: Vec2) {
+        self.harness.hover_at(at);
+        self.harness.step();
+        self.harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta,
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::COMMAND,
+        });
+        for _ in 0..30 {
+            self.harness.step();
+        }
+        self.settle();
+    }
+
+    fn zoom_key(&mut self, key: egui::Key) {
+        self.harness
+            .key_press_modifiers(egui::Modifiers::COMMAND, key);
+        self.settle();
+    }
+}
+
+#[test]
+fn ctrl_wheel_zooms_around_the_pointer_even_over_a_card_and_is_saved() {
+    let mut ui = side_by_side();
+    let at = ui.card(&feed("a")).center();
+    let under = ui.canvas_point(at);
+    let width = ui.card(&feed("a")).width();
+    ui.ctrl_wheel(at, Vec2::new(0.0, -100.0));
+    let zoom = ui.zoom();
+    assert!(zoom < 0.9, "zoomed out: {zoom}");
+    assert!((ui.canvas_point(at) - under).length() < 1.0, "anchored");
+    assert!((ui.card(&feed("a")).width() - width * zoom).abs() < 0.5);
+    // Positions and sizes stay in canvas units; the zoom is saved with the
+    // view in whole percent.
+    let saved = ui.saves_until_idle();
+    assert_eq!(saved.view.zoom, (f64::from(zoom) * 100.0).round() / 100.0);
+    assert_eq!((saved.cards[0].x, saved.cards[0].width), (10.0, 400.0));
+    // Pinching zooms too.
+    let zoom = ui.zoom();
+    ui.harness.hover_at(at);
+    ui.harness.event(egui::Event::Zoom(1.5));
+    ui.settle();
+    assert!((ui.zoom() - zoom * 1.5).abs() < 0.001);
+}
+
+#[test]
+fn ctrl_up_and_down_step_the_canvas_zoom_and_the_indicator_resets() {
+    let mut ui = side_by_side();
+    let middle = ui.app().canvas_area().center();
+    let under = ui.canvas_point(middle);
+    ui.zoom_key(egui::Key::ArrowUp);
+    assert_eq!(ui.zoom(), 1.1);
+    ui.harness.get_by_label("Zoom 110%");
+    assert!((ui.canvas_point(middle) - under).length() < 0.01);
+    for _ in 0..3 {
+        ui.zoom_key(egui::Key::ArrowDown);
+    }
+    assert_eq!(ui.zoom(), 0.75);
+    ui.harness.get_by_label("Zoom 75%").click();
+    ui.settle();
+    assert_eq!(ui.zoom(), 1.0);
+    assert!((ui.canvas_point(middle) - under).length() < 0.01);
+
+    // In a text field they keep moving the cursor; the canvas stays put.
+    ui.field("Add a todo").focus();
+    ui.harness.step();
+    ui.zoom_key(egui::Key::ArrowDown);
+    assert_eq!(ui.zoom(), 1.0);
+}
+
+#[test]
+fn ctrl_plus_and_minus_scale_the_whole_window_not_the_canvas() {
+    let mut ui = side_by_side();
+    ui.zoom_key(egui::Key::Equals);
+    assert!(ui.harness.ctx.zoom_factor() > 1.0);
+    assert_eq!(ui.zoom(), 1.0, "the canvas zoom is unchanged");
+    ui.harness.get_by_label("Zoom 100%");
+    ui.zoom_key(egui::Key::Num0);
+    assert_eq!(ui.harness.ctx.zoom_factor(), 1.0);
+}
+
+#[test]
+fn resize_grips_keep_their_screen_size_when_zoomed_out() {
+    let mut ui = side_by_side();
+    while ui.zoom() > 0.25 {
+        ui.zoom_key(egui::Key::ArrowDown);
+    }
+    assert_eq!(ui.zoom(), 0.25);
+    let before = ui.canvas().card(&feed("a")).unwrap().rect.size();
+    // Four screen points in from the right edge, halfway down.
+    let card = ui.card(&feed("a"));
+    let edge = egui::pos2(card.right() - 4.0, card.center().y);
+    ui.drag(edge, edge + Vec2::new(10.0, 0.0));
+    let after = ui.canvas().card(&feed("a")).unwrap().rect.size();
+    assert_eq!(after - before, Vec2::new(40.0, 0.0));
+}
+
+#[test]
+fn cards_move_resize_drop_and_promote_the_same_way_when_zoomed() {
+    let mut ui = side_by_side();
+    let close = ui.harness.query_all_by_label("Close card").next().unwrap();
+    let full = close.rect().width();
+    while ui.zoom() > 0.5 {
+        ui.zoom_key(egui::Key::ArrowDown);
+    }
+    assert_eq!(ui.zoom(), 0.5);
+    // Accessibility bounds follow the drawn cards.
+    let close = ui.harness.query_all_by_label("Close card").next().unwrap();
+    assert!((close.rect().width() - full / 2.0).abs() < 0.5);
+    let todos = ui.harness.get_by_label("Todos").rect();
+    assert!(ui.card(&Target::Board(2)).contains_rect(todos));
+
+    // Drag-to-promote finds the scaled board.
+    let grip = ui
+        .harness
+        .get_by_label("Drag to reorder or promote")
+        .rect()
+        .center();
+    let todos = ui.harness.get_by_label("Todos").rect().center();
+    ui.drag(grip, todos);
+    assert_eq!(ui.ops(), [promote(PromoteKind::Todo)]);
+
+    // A screen drag moves a card twice as far in canvas units.
+    let from = ui.canvas().card(&feed("a")).unwrap().rect;
+    let title = ui.title_bar(&feed("a"));
+    ui.drag(title, title + Vec2::new(40.0, 30.0));
+    let moved = ui.canvas().card(&feed("a")).unwrap().rect;
+    assert_eq!(moved.min - from.min, Vec2::new(80.0, 60.0));
+    // And resizes it twice as much.
+    let corner = ui.card(&feed("a")).right_bottom() - Vec2::splat(3.0);
+    ui.drag(corner, corner + Vec2::new(20.0, 10.0));
+    let resized = ui.canvas().card(&feed("a")).unwrap().rect;
+    assert_eq!(resized.size() - moved.size(), Vec2::new(40.0, 20.0));
+
+    // A sidebar drop still lands the pointer on the card's title bar.
+    let entry = ui.harness.get_by_label("Inbox").rect().center();
+    let drop = ui.app().canvas_area().left_top() + Vec2::new(200.0, 150.0);
+    ui.drag(entry, drop);
+    let card = ui.card(&Target::Board(2));
+    let bar = Rect::from_min_size(card.min, Vec2::new(card.width(), TITLE_HEIGHT * 0.5));
+    assert!(bar.contains(drop), "{card:?} under {drop:?}");
+    assert_eq!(ui.zoom(), 0.5, "the drop kept the zoom");
+}
+
+#[test]
+fn show_all_zooms_out_until_every_card_fits() {
+    let layout = serde_json::from_value(json!({
+        "view": {"x": 0, "y": 0, "zoom": 1.5},
+        "cards": [
+            {"target": {"kind": "feed", "name": "a"},
+             "x": 0, "y": 0, "width": 400, "height": 500, "collapsed": false},
+            {"target": {"kind": "board", "id": 2},
+             "x": 2600, "y": 900, "width": 420, "height": 600, "collapsed": false},
+        ],
+    }))
+    .unwrap();
+    let mut ui = Ui::with(Saved {
+        layouts: vec![NamedLayout {
+            name: "Day".into(),
+            layout,
+            updated_at_ms: 0,
+        }],
+        ..Saved::default()
+    });
+    assert_eq!(ui.zoom(), 1.5, "opened at its saved zoom");
+    ui.harness.get_by_label("Zoom 150%");
+    ui.layout_action("Show all");
+    ui.settle();
+    assert!(ui.zoom() < 0.5);
+    let area = ui.app().canvas_area();
+    assert!(area.contains_rect(ui.card(&feed("a"))));
+    assert!(area.contains_rect(ui.card(&Target::Board(2))));
+}
+
+#[test]
+fn item_details_stay_full_size_when_zoomed_out() {
+    let mut ui = side_by_side();
+    let row = ui.harness.get_by_label("Item").rect().center();
+    ui.rest(row, 1.25);
+    let full = ui.harness.get_by_label("Body text").rect().height();
+    ui.rest(ui.empty_canvas(), 0.25);
+    while ui.zoom() > 0.5 {
+        ui.zoom_key(egui::Key::ArrowDown);
+    }
+    let row = ui.harness.get_by_label("Item").rect().center();
+    ui.rest(row, 1.25);
+    assert!(ui.details_shown());
+    assert_eq!(ui.harness.get_by_label("Body text").rect().height(), full);
+}
+
+#[test]
+fn revealing_a_card_too_big_for_the_view_zooms_out_just_enough() {
+    let mut ui = side_by_side();
+    ui.zoom_key(egui::Key::ArrowUp);
+    ui.zoom_key(egui::Key::ArrowUp);
+    ui.zoom_key(egui::Key::ArrowUp);
+    assert_eq!(ui.zoom(), 1.5);
+    ui.harness.get_by_label("Inbox").click();
+    ui.settle();
+    let zoom = ui.zoom();
+    assert!(zoom < 1.5, "{zoom}");
+    let area = ui.app().canvas_area();
+    assert!(area.contains_rect(ui.card(&Target::Board(2))));
+    // Revealing a card that already fits keeps the zoom.
+    ui.harness.get_by_label("a title").click();
+    ui.settle();
+    assert_eq!(ui.zoom(), zoom);
+}
